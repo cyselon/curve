@@ -6,7 +6,7 @@ import (
 )
 
 type Handler interface {
-	HandlePacket(packet *Packet, mux *Multiplexer)
+	HandlePacket(packet *Frame, mux *Multiplexer)
 	Multiplexer(conn net.Conn) *Multiplexer
 }
 
@@ -52,16 +52,16 @@ func (s *Server) handleConnection(conn net.Conn) {
 	mux := s.handler.Multiplexer(conn)
 	fmt.Printf("Client connected from %s\n", conn.RemoteAddr())
 
-	// 简单回显所有接收到的数据包
+	// 简单回显所有接收到的帧
 	for {
-		packet, err := mux.ReceivePacket()
+		frame, err := mux.ReceiveFrame()
 		if err != nil {
-			fmt.Printf("Error receiving packet: %v\n", err)
+			fmt.Printf("Error receiving frame: %v\n", err)
 			return
 		}
 
-		fmt.Printf("Received: StreamID=%d, Data=%s\n", packet.StreamID, string(packet.Data))
+		fmt.Printf("Received: StreamID=%d, Data=%s\n", frame.Header.StreamID, string(frame.Data))
 
-		s.handler.HandlePacket(packet, mux)
+		s.handler.HandlePacket(frame, mux)
 	}
 }
