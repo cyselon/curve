@@ -60,10 +60,10 @@ func (s *MplHandler) Multiplexer(conn net.Conn) *core.Multiplexer {
 }
 
 // handlePacket 处理数据包
-func (s *MplHandler) HandlePacket(packet *core.Packet, mux *core.Multiplexer) {
+func (s *MplHandler) HandlePacket(frame *core.Frame, mux *core.Multiplexer) {
 	var cmd Command
-	if err := json.Unmarshal(packet.Data, &cmd); err != nil {
-		fmt.Printf("Error decoding command: %v, stream: %d, size: %d, data: %s\n", err, packet.StreamID, len(packet.Data), string(packet.Data))
+	if err := json.Unmarshal(frame.Data, &cmd); err != nil {
+		fmt.Printf("Error decoding command: %v, stream: %d, size: %d, data: %s\n", err, frame.Header.StreamID, len(frame.Data), string(frame.Data))
 		return
 	}
 
@@ -72,7 +72,7 @@ func (s *MplHandler) HandlePacket(packet *core.Packet, mux *core.Multiplexer) {
 	case "ping":
 		fmt.Println("Received ping command")
 		response := map[string]any{"message": "pong"}
-		s.sendResponse(mux, packet.StreamID, response)
+		s.sendResponse(mux, frame.Header.StreamID, response)
 	case "upload":
 		fmt.Println("Received upload command")
 		// 处理上传逻辑
@@ -89,11 +89,16 @@ func (s *MplHandler) sendResponse(mux *core.Multiplexer, streamID uint32, data m
 		return
 	}
 
-	packet := &core.Packet{
-		StreamID: streamID,
-		Data:     response,
+	frame := &core.Frame{
+		Header: core.Header{
+			Version:  core.FrameVersion,
+			Flags:    core.FrameFlags,
+			StreamID: streamID,
+			Length:   uint32(len(response)),
+		},
+		Data: response,
 	}
-	if err := mux.SendPacket(packet); err != nil {
+	if err := mux.SendFrame(frame); err != nil {
 		fmt.Println("Error sending response:", err)
 	}
 }

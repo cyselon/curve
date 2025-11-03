@@ -18,16 +18,21 @@ func NewClient(addr string) (*Client, error) {
 }
 
 func (c *Client) SendPacket(streamID uint32, data []byte) error {
-	packet := &Packet{
-		StreamID: streamID,
-		Data:     data,
+	frame := &Frame{
+		Header: Header{
+			Version:  FrameVersion,
+			Flags:    FrameFlags,
+			StreamID: streamID,
+			Length:   uint32(len(data)),
+		},
+		Data: data,
 	}
 
-	encoded := EncodePacket(packet)
+	encoded := frame.Encode()
 	_, err := c.conn.Write(encoded)
 	return err
 }
 
-func (c *Client) Close() {
-	c.conn.Close()
+func (c *Client) Close() error {
+	return c.conn.Close()
 }

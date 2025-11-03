@@ -37,10 +37,10 @@ func TestMultiplexConcurrentStreams(t *testing.T) {
 	totalPackets := numStreams * messagesPerStream
 
 	// 设置测试端口
-	port := ":18888"
+	addr := "127.0.0.1:18888"
 
 	// 启动服务器
-	listener, err := net.Listen("tcp", port)
+	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		t.Fatalf("Failed to start server: %v", err)
 	}
@@ -71,18 +71,18 @@ func TestMultiplexConcurrentStreams(t *testing.T) {
 		done := make(chan bool)
 		go func() {
 			for i := 0; i < totalPackets; i++ { // 预期接收所有数据包
-				packet, err := serverMux.ReceivePacket()
+				frame, err := serverMux.ReceiveFrame()
 				if err != nil {
 					// 忽略错误，可能是因为客户端关闭连接
 					break
 				}
 
 				receivedMu.Lock()
-				receivedData[packet.StreamID] = append(receivedData[packet.StreamID], string(packet.Data))
+				receivedData[frame.Header.StreamID] = append(receivedData[frame.Header.StreamID], string(frame.Data))
 				receivedMu.Unlock()
 
 				// 回显数据
-				if err := serverMux.SendPacket(packet); err != nil {
+				if err := serverMux.SendFrame(frame); err != nil {
 					// 忽略错误
 				}
 			}
@@ -145,7 +145,7 @@ func TestMultiplexConcurrentStreams(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 创建客户端连接
-	clientConn, err := net.Dial("tcp", "localhost"+port)
+	clientConn, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatalf("Failed to connect to server: %v", err)
 	}
@@ -174,13 +174,18 @@ func TestMultiplexConcurrentStreams(t *testing.T) {
 					// 构造测试数据
 					data := []byte(fmt.Sprintf("Stream%d-Message%d", streamID, msgID))
 
-					// 创建并发送数据包
-					packet := &core.Packet{
-						StreamID: uint32(streamID),
-						Data:     data,
+					// 创建并发送帧
+					frame := &core.Frame{
+						Header: core.Header{
+							Version:  core.FrameVersion,
+							Flags:    core.FrameFlags,
+							StreamID: uint32(streamID),
+							Length:   uint32(len(data)),
+						},
+						Data: data,
 					}
 
-					if err := clientMux.SendPacket(packet); err != nil {
+					if err := clientMux.SendFrame(frame); err != nil {
 						errors <- fmt.Errorf("Failed to send packet for stream %d: %v", streamID, err)
 						return
 					}
@@ -233,10 +238,10 @@ func TestMultiplexStreamOrdering(t *testing.T) {
 	numStreams := 2
 	totalPackets := numMessages * numStreams
 
-	port := ":18889"
+	addr := "127.0.0.1:18889"
 
 	// 启动服务器
-	listener, err := net.Listen("tcp", port)
+	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		t.Fatalf("Failed to start server: %v", err)
 	}
@@ -260,17 +265,17 @@ func TestMultiplexStreamOrdering(t *testing.T) {
 
 		// 接收所有数据包并记录
 		for i := 0; i < totalPackets; i++ {
-			packet, err := serverMux.ReceivePacket()
+			frame, err := serverMux.ReceiveFrame()
 			if err != nil {
 				break
 			}
 
 			serverMu.Lock()
-			serverReceivedData[packet.StreamID] = append(serverReceivedData[packet.StreamID], string(packet.Data))
+			serverReceivedData[frame.Header.StreamID] = append(serverReceivedData[frame.Header.StreamID], string(frame.Data))
 			serverMu.Unlock()
 
 			// 回显
-			serverMux.SendPacket(packet)
+			serverMux.SendFrame(frame)
 		}
 		serverDone <- true
 	}()
@@ -279,7 +284,7 @@ func TestMultiplexStreamOrdering(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 客户端连接
-	clientConn, err := net.Dial("tcp", "localhost"+port)
+	clientConn, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatalf("Failed to connect: %v", err)
 	}
@@ -290,21 +295,33 @@ func TestMultiplexStreamOrdering(t *testing.T) {
 	// 从两个流交替发送数据
 	for i := 0; i < numMessages; i++ {
 		// 流1
-		packet1 := &core.Packet{
-			StreamID: 1,
-			Data:     []byte(fmt.Sprintf("Stream1-Msg%d", i)),
+		data1 := []byte(fmt.Sprintf("Stream1-Msg%d", i))
+		frame1 := &core.Frame{
+			Header: core.Header{
+				Version:  core.FrameVersion,
+				Flags:    core.FrameFlags,
+				StreamID: 1,
+				Length:   uint32(len(data1)),
+			},
+			Data: data1,
 		}
-		if err := clientMux.SendPacket(packet1); err != nil {
-			t.Errorf("Failed to send packet for stream 1: %v", err)
+		if err := clientMux.SendFrame(frame1); err != nil {
+			t.Errorf("Failed to send frame for stream 1: %v", err)
 		}
 
 		// 流2
-		packet2 := &core.Packet{
-			StreamID: 2,
-			Data:     []byte(fmt.Sprintf("Stream2-Msg%d", i)),
+		data2 := []byte(fmt.Sprintf("Stream2-Msg%d", i))
+		frame2 := &core.Frame{
+			Header: core.Header{
+				Version:  core.FrameVersion,
+				Flags:    core.FrameFlags,
+				StreamID: 2,
+				Length:   uint32(len(data2)),
+			},
+			Data: data2,
 		}
-		if err := clientMux.SendPacket(packet2); err != nil {
-			t.Errorf("Failed to send packet for stream 2: %v", err)
+		if err := clientMux.SendFrame(frame2); err != nil {
+			t.Errorf("Failed to send frame for stream 2: %v", err)
 		}
 	}
 
@@ -358,9 +375,9 @@ func TestMultiplexLargeData(t *testing.T) {
 	numStreams := 5
 	largeDataSize := 512
 
-	port := ":18890"
+	addr := "127.0.0.1:18890"
 
-	listener, err := net.Listen("tcp", port)
+	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		t.Fatalf("Failed to start server: %v", err)
 	}
@@ -383,17 +400,17 @@ func TestMultiplexLargeData(t *testing.T) {
 		serverMux := core.NewMultiplexer(conn)
 
 		for i := 0; i < numStreams; i++ {
-			packet, err := serverMux.ReceivePacket()
+			frame, err := serverMux.ReceiveFrame()
 			if err != nil {
 				break
 			}
 
 			serverMu.Lock()
-			serverReceivedData[packet.StreamID] = packet.Data
+			serverReceivedData[frame.Header.StreamID] = frame.Data
 			serverMu.Unlock()
 
 			// 回显数据
-			serverMux.SendPacket(packet)
+			serverMux.SendFrame(frame)
 		}
 		serverDone <- true
 	}()
@@ -401,7 +418,7 @@ func TestMultiplexLargeData(t *testing.T) {
 	<-serverReady
 	time.Sleep(100 * time.Millisecond)
 
-	clientConn, err := net.Dial("tcp", "localhost"+port)
+	clientConn, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatalf("Failed to connect: %v", err)
 	}
@@ -423,14 +440,19 @@ func TestMultiplexLargeData(t *testing.T) {
 		prefix := []byte(fmt.Sprintf("Stream%d:", streamID))
 		fullData := append(prefix, largeData...)
 
-		packet := &core.Packet{
-			StreamID: uint32(streamID),
-			Data:     fullData,
+		frame := &core.Frame{
+			Header: core.Header{
+				Version:  core.FrameVersion,
+				Flags:    core.FrameFlags,
+				StreamID: uint32(streamID),
+				Length:   uint32(len(fullData)),
+			},
+			Data: fullData,
 		}
 
 		clientSentData[uint32(streamID)] = fullData
 
-		if err := clientMux.SendPacket(packet); err != nil {
+		if err := clientMux.SendFrame(frame); err != nil {
 			t.Errorf("Failed to send large data for stream %d: %v", streamID, err)
 		}
 	}

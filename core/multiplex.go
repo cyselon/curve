@@ -1,8 +1,6 @@
 package core
 
 import (
-	"encoding/binary"
-	"io"
 	"net"
 	"sync"
 )
@@ -24,43 +22,27 @@ func NewMultiplexer(conn net.Conn) *Multiplexer {
 	}
 }
 
-// SendPacket 发送数据包
-func (m *Multiplexer) SendPacket(packet *Packet) error {
+// SendFrame 发送帧
+func (m *Multiplexer) SendFrame(frame *Frame) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// 编码数据包：4字节流ID + 4字节数据长度 + 数据
-	buf := make([]byte, 8+len(packet.Data))
-	binary.BigEndian.PutUint32(buf[:4], packet.StreamID)
-	binary.BigEndian.PutUint32(buf[4:8], uint32(len(packet.Data)))
-	copy(buf[8:], packet.Data)
+	// 使用 Encode 编码帧
+	buf := frame.Encode()
 
 	// 发送数据
 	_, err := m.conn.Write(buf)
 	return err
 }
 
-// ReceivePacket 接收数据包
-func (m *Multiplexer) ReceivePacket() (*Packet, error) {
-	// 读取固定8字节头部：4字节流ID + 4字节数据长度
-	header := make([]byte, 8)
-	if _, err := io.ReadFull(m.conn, header); err != nil {
+// ReceiveFrame 接收帧
+func (m *Multiplexer) ReceiveFrame() (*Frame, error) {
+	frame := &Frame{}
+	err := frame.Decode(m.conn)
+	if err != nil {
 		return nil, err
 	}
-
-	streamID := binary.BigEndian.Uint32(header[:4])
-	dataLen := binary.BigEndian.Uint32(header[4:8])
-
-	// 读取实际数据
-	data := make([]byte, dataLen)
-	if _, err := io.ReadFull(m.conn, data); err != nil {
-		return nil, err
-	}
-
-	return &Packet{
-		StreamID: streamID,
-		Data:     data,
-	}, nil
+	return frame, nil
 }
 
 // CreateStream 创建一个新的流
