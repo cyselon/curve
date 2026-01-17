@@ -50,6 +50,7 @@ func (frame *Frame) Decode(r io.Reader) error {
 
 	offset := 0
 	frame.Header.Version = header[offset]
+	offset++
 	frame.Header.Flags = header[offset]
 	offset++
 	frame.Header.StreamID = binary.BigEndian.Uint32(header[offset : offset+4])
