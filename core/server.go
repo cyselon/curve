@@ -22,7 +22,7 @@ func NewServer(addr string, handler Handler) *Server {
 	}
 }
 
-// StartServer 启动一个 TCP 服务器
+// Start starts a TCP server
 func (s *Server) Start() {
 	listener, err := net.Listen("tcp", s.addr)
 	if err != nil {
@@ -40,19 +40,19 @@ func (s *Server) Start() {
 			continue
 		}
 
-		// 为每个连接创建一个 goroutine 处理
+		// Handle each connection in a separate goroutine
 		go s.handleConnection(conn)
 	}
 }
 
-// handleConnection 处理客户端连接
+// handleConnection handles client connections
 func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
 	mux := s.handler.Multiplexer(conn)
 	fmt.Printf("Client connected from %s\n", conn.RemoteAddr())
 
-	// 简单回显所有接收到的帧
+	// Simple echo of all received frames
 	for {
 		frame, err := mux.ReceiveFrame()
 		if err != nil {
