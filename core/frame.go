@@ -23,7 +23,7 @@ const (
 )
 
 func (frame *Frame) Encode() []byte {
-	// 编码帧：1字节Version + 1字节Flags + 4字节StreamID + 4字节Length + 数据
+	// Encode frame: 1 byte Version + 1 byte Flags + 4 bytes StreamID + 4 bytes Length + data
 	headerSize := 10 // 1 + 1 + 4 + 4
 	buf := make([]byte, headerSize+len(frame.Data))
 
@@ -42,7 +42,7 @@ func (frame *Frame) Encode() []byte {
 }
 
 func (frame *Frame) Decode(r io.Reader) error {
-	// 读取固定10字节头部：1字节Version + 1字节Flags + 4字节StreamID + 4字节Length
+	// Read fixed 10-byte header: 1 byte Version + 1 byte Flags + 4 bytes StreamID + 4 bytes Length
 	header := make([]byte, 10)
 	if _, err := io.ReadFull(r, header); err != nil {
 		return err
@@ -57,7 +57,7 @@ func (frame *Frame) Decode(r io.Reader) error {
 	offset += 4
 	frame.Header.Length = binary.BigEndian.Uint32(header[offset : offset+4])
 
-	// 读取实际数据
+	// Read actual data
 	data := make([]byte, frame.Header.Length)
 	if _, err := io.ReadFull(r, data); err != nil {
 		return err

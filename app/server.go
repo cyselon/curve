@@ -56,7 +56,8 @@ func NewMplHandler() *MplHandler {
 }
 
 func (s *MplHandler) Multiplexer(conn net.Conn) *core.Multiplexer {
-	return core.NewMultiplexer(conn)
+	// 服务器使用偶数流
+	return core.NewMultiplexer(conn, false)
 }
 
 // handlePacket 处理数据包
