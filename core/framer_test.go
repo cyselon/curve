@@ -8,12 +8,12 @@ import (
 	"time"
 )
 
-// TestMultiplexerFrameSendReceive 测试帧的发送和接收功能
+// TestFramerFrameSendReceive 测试帧的发送和接收功能
 // 验证要点：
 //   - 帧的编码和解码正确性
-//   - 通过 Multiplexer 发送和接收帧
+//   - 通过 Framer 发送和接收帧
 //   - 帧头部信息（Version, Flags, StreamID, Length）正确传输
-func TestMultiplexerFrameSendReceive(t *testing.T) {
+func TestFramerFrameSendReceive(t *testing.T) {
 	// 创建本地TCP连接对用于测试
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -37,7 +37,7 @@ func TestMultiplexerFrameSendReceive(t *testing.T) {
 		}
 		defer conn.Close()
 
-		serverMux := NewMultiplexer(conn, false) // 服务器使用偶数流
+		serverMux := NewFramer(conn, false) // 服务器使用偶数流
 		frame, err := serverMux.ReceiveFrame()
 
 		serverMu.Lock()
@@ -56,10 +56,10 @@ func TestMultiplexerFrameSendReceive(t *testing.T) {
 	}
 	defer clientConn.Close()
 
-	clientMux := NewMultiplexer(clientConn, true) // 客户端使用奇数流
+	clientMux := NewFramer(clientConn, true) // 客户端使用奇数流
 
 	// 创建测试帧
-	testData := []byte("Hello, Multiplexer!")
+	testData := []byte("Hello, Framer!")
 	testFrame := &Frame{
 		Header: Header{
 			Version:  FrameVersion,
@@ -115,12 +115,12 @@ func TestMultiplexerFrameSendReceive(t *testing.T) {
 	t.Log("Frame send/receive test passed")
 }
 
-// TestMultiplexerFrameEncodeDecode 测试帧的编码和解码功能
+// TestFramerFrameEncodeDecode 测试帧的编码和解码功能
 // 验证要点：
 //   - 帧的 Encode 方法正确编码
 //   - 帧的 Decode 方法正确解码
 //   - 编码后再解码应该得到原始帧
-func TestMultiplexerFrameEncodeDecode(t *testing.T) {
+func TestFramerFrameEncodeDecode(t *testing.T) {
 	testCases := []struct {
 		name  string
 		frame *Frame
@@ -207,18 +207,18 @@ func TestMultiplexerFrameEncodeDecode(t *testing.T) {
 	}
 }
 
-// TestMultiplexerStreamCreateClose 测试流的创建和关闭功能
+// TestFramerStreamCreateClose 测试流的创建和关闭功能
 // 验证要点：
 //   - CreateStream 创建新流并返回正确的流ID和通道
 //   - 流ID递增
 //   - CloseStream 正确关闭流并清理资源
-func TestMultiplexerStreamCreateClose(t *testing.T) {
+func TestFramerStreamCreateClose(t *testing.T) {
 	// 创建虚拟连接（使用管道）
 	clientConn, serverConn := net.Pipe()
 	defer clientConn.Close()
 	defer serverConn.Close()
 
-	clientMux := NewMultiplexer(clientConn, true) // 客户端使用奇数流
+	clientMux := NewFramer(clientConn, true) // 客户端使用奇数流
 
 	// 测试创建多个流
 	streamIDs := make([]uint32, 5)
@@ -233,7 +233,7 @@ func TestMultiplexerStreamCreateClose(t *testing.T) {
 		if streamID%2 == 0 {
 			t.Errorf("Stream %d: expected odd stream ID for client, got %d", i, streamID)
 		}
-		
+
 		// 验证流ID递增（奇数流：1, 3, 5, 7, 9...）
 		expectedID := uint32(i*2 + 1)
 		if streamID != expectedID {
@@ -289,12 +289,12 @@ func TestMultiplexerStreamCreateClose(t *testing.T) {
 	t.Log("Stream create/close test passed")
 }
 
-// TestMultiplexerMultipleFramesSameStream 测试同一流发送多个帧
+// TestFramerMultipleFramesSameStream 测试同一流发送多个帧
 // 验证要点：
 //   - 同一流ID可以发送多个帧
 //   - 每个帧都能正确接收
 //   - 数据内容正确
-func TestMultiplexerMultipleFramesSameStream(t *testing.T) {
+func TestFramerMultipleFramesSameStream(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("Failed to create listener: %v", err)
@@ -315,7 +315,7 @@ func TestMultiplexerMultipleFramesSameStream(t *testing.T) {
 		}
 		defer conn.Close()
 
-		serverMux := NewMultiplexer(conn, false) // 服务器使用偶数流
+		serverMux := NewFramer(conn, false) // 服务器使用偶数流
 
 		// 接收多个帧
 		for i := 0; i < 5; i++ {
@@ -340,7 +340,7 @@ func TestMultiplexerMultipleFramesSameStream(t *testing.T) {
 	}
 	defer clientConn.Close()
 
-	clientMux := NewMultiplexer(clientConn, true) // 客户端使用奇数流
+	clientMux := NewFramer(clientConn, true) // 客户端使用奇数流
 
 	streamID := uint32(1)
 	numFrames := 5
@@ -390,11 +390,11 @@ func TestMultiplexerMultipleFramesSameStream(t *testing.T) {
 	t.Log("Multiple frames same stream test passed")
 }
 
-// TestMultiplexerConcurrentFrameSend 测试并发发送帧
+// TestFramerConcurrentFrameSend 测试并发发送帧
 // 验证要点：
 //   - 多个goroutine并发发送帧不会出错
 //   - 所有帧都能正确接收
-func TestMultiplexerConcurrentFrameSend(t *testing.T) {
+func TestFramerConcurrentFrameSend(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("Failed to create listener: %v", err)
@@ -415,7 +415,7 @@ func TestMultiplexerConcurrentFrameSend(t *testing.T) {
 		}
 		defer conn.Close()
 
-		serverMux := NewMultiplexer(conn, false) // 服务器使用偶数流
+		serverMux := NewFramer(conn, false) // 服务器使用偶数流
 
 		// 接收多个帧
 		for i := 0; i < 10; i++ {
@@ -440,7 +440,7 @@ func TestMultiplexerConcurrentFrameSend(t *testing.T) {
 	}
 	defer clientConn.Close()
 
-	clientMux := NewMultiplexer(clientConn, true) // 客户端使用奇数流
+	clientMux := NewFramer(clientConn, true) // 客户端使用奇数流
 
 	// 并发发送帧
 	var wg sync.WaitGroup

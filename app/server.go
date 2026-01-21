@@ -55,13 +55,13 @@ func NewMplHandler() *MplHandler {
 	return &MplHandler{}
 }
 
-func (s *MplHandler) Multiplexer(conn net.Conn) *core.Multiplexer {
+func (s *MplHandler) Framer(conn net.Conn) *core.Framer {
 	// 服务器使用偶数流
-	return core.NewMultiplexer(conn, false)
+	return core.NewFramer(conn, false)
 }
 
 // handlePacket 处理数据包
-func (s *MplHandler) HandlePacket(frame *core.Frame, mux *core.Multiplexer) {
+func (s *MplHandler) HandlePacket(frame *core.Frame, mux *core.Framer) {
 	var cmd Command
 	if err := json.Unmarshal(frame.Data, &cmd); err != nil {
 		fmt.Printf("Error decoding command: %v, stream: %d, size: %d, data: %s\n", err, frame.Header.StreamID, len(frame.Data), string(frame.Data))
@@ -83,7 +83,7 @@ func (s *MplHandler) HandlePacket(frame *core.Frame, mux *core.Multiplexer) {
 }
 
 // sendResponse 发送响应
-func (s *MplHandler) sendResponse(mux *core.Multiplexer, streamID uint32, data map[string]interface{}) {
+func (s *MplHandler) sendResponse(mux *core.Framer, streamID uint32, data map[string]interface{}) {
 	response, err := json.Marshal(data)
 	if err != nil {
 		fmt.Println("Error encoding response:", err)

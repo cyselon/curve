@@ -61,7 +61,7 @@ func TestMultiplexConcurrentStreams(t *testing.T) {
 		defer conn.Close()
 
 		// 创建多路复用器处理服务器端
-		serverMux := core.NewMultiplexer(conn, false) // 服务器使用偶数流
+		serverMux := core.NewFramer(conn, false) // 服务器使用偶数流
 
 		// 创建 map 来存储每个流接收的数据
 		receivedData := make(map[uint32][]string)
@@ -152,7 +152,7 @@ func TestMultiplexConcurrentStreams(t *testing.T) {
 	defer clientConn.Close()
 
 	// 创建客户端多路复用器
-	clientMux := core.NewMultiplexer(clientConn, true) // 客户端使用奇数流
+	clientMux := core.NewFramer(clientConn, true) // 客户端使用奇数流
 
 	// 使用 WaitGroup 等待所有 goroutine 完成
 	var wg sync.WaitGroup
@@ -261,7 +261,7 @@ func TestMultiplexStreamOrdering(t *testing.T) {
 		}
 		defer conn.Close()
 
-		serverMux := core.NewMultiplexer(conn, false) // 服务器使用偶数流
+		serverMux := core.NewFramer(conn, false) // 服务器使用偶数流
 
 		// 接收所有数据包并记录
 		for i := 0; i < totalPackets; i++ {
@@ -290,7 +290,7 @@ func TestMultiplexStreamOrdering(t *testing.T) {
 	}
 	defer clientConn.Close()
 
-	clientMux := core.NewMultiplexer(clientConn, true) // 客户端使用奇数流
+	clientMux := core.NewFramer(clientConn, true) // 客户端使用奇数流
 
 	// 从两个流交替发送数据
 	for i := 0; i < numMessages; i++ {
@@ -397,7 +397,7 @@ func TestMultiplexLargeData(t *testing.T) {
 		}
 		defer conn.Close()
 
-		serverMux := core.NewMultiplexer(conn, false) // 服务器使用偶数流
+		serverMux := core.NewFramer(conn, false) // 服务器使用偶数流
 
 		for i := 0; i < numStreams; i++ {
 			frame, err := serverMux.ReceiveFrame()
@@ -424,7 +424,7 @@ func TestMultiplexLargeData(t *testing.T) {
 	}
 	defer clientConn.Close()
 
-	clientMux := core.NewMultiplexer(clientConn, true) // 客户端使用奇数流
+	clientMux := core.NewFramer(clientConn, true) // 客户端使用奇数流
 
 	// 准备大数据
 	largeData := make([]byte, largeDataSize)

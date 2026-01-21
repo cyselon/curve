@@ -52,7 +52,7 @@ func TestConnectionReadWrite(t *testing.T) {
 
 	// 测试数据
 	testData := []byte("Hello, Connection!")
-	
+
 	// 客户端写入数据
 	n, err := clientConnection.Write(testData)
 	if err != nil {
@@ -169,7 +169,7 @@ func TestConnectionLargeData(t *testing.T) {
 			continue
 		}
 		allData = append(allData, buf[:n]...)
-		
+
 		// 如果已经收到所有数据，退出
 		if len(allData) >= largeDataSize {
 			break
@@ -259,10 +259,10 @@ func TestConnectionNetConnMethods(t *testing.T) {
 		t.Errorf("SetWriteDeadline failed: %v", err)
 	}
 
-	// 测试 GetMultiplexer
-	mux := clientConnection.GetMultiplexer()
+	// 测试 GetFramer
+	mux := clientConnection.GetFramer()
 	if mux == nil {
-		t.Error("GetMultiplexer returned nil")
+		t.Error("GetFramer returned nil")
 	}
 
 	// 测试 OpenStream

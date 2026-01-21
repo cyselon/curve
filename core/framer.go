@@ -22,19 +22,19 @@ var (
 	ErrStreamDirectionMismatch = errors.New("stream direction mismatch")
 )
 
-// Multiplexer is a multiplexer for managing streams
-type Multiplexer struct {
-	conn                  net.Conn
-	streams               map[uint32]chan []byte // map of stream ID to data channel
-	nextStream            uint32                 // next stream ID
-	maxConcurrentStreams  uint32                 // maximum number of concurrent streams
-	isClient              bool                   // whether this is a client (clients use odd streams, servers use even streams)
-	mu                    sync.Mutex
+// Framer is a Framer for managing streams
+type Framer struct {
+	conn                 net.Conn
+	streams              map[uint32]chan []byte // map of stream ID to data channel
+	nextStream           uint32                 // next stream ID
+	maxConcurrentStreams uint32                 // maximum number of concurrent streams
+	isClient             bool                   // whether this is a client (clients use odd streams, servers use even streams)
+	mu                   sync.Mutex
 }
 
-// NewMultiplexer creates a new multiplexer
+// NewFramer creates a new framer
 // isClient: true for client (uses odd streams), false for server (uses even streams)
-func NewMultiplexer(conn net.Conn, isClient bool) *Multiplexer {
+func NewFramer(conn net.Conn, isClient bool) *Framer {
 	var initialStream uint32
 	if isClient {
 		initialStream = 1 // client starts from 1 (odd)
@@ -42,7 +42,7 @@ func NewMultiplexer(conn net.Conn, isClient bool) *Multiplexer {
 		initialStream = 2 // server starts from 2 (even)
 	}
 
-	return &Multiplexer{
+	return &Framer{
 		conn:                 conn,
 		streams:              make(map[uint32]chan []byte),
 		nextStream:           initialStream,
@@ -52,21 +52,21 @@ func NewMultiplexer(conn net.Conn, isClient bool) *Multiplexer {
 }
 
 // SetMaxConcurrentStreams sets the maximum number of concurrent streams
-func (m *Multiplexer) SetMaxConcurrentStreams(max uint32) {
+func (m *Framer) SetMaxConcurrentStreams(max uint32) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.maxConcurrentStreams = max
 }
 
 // GetMaxConcurrentStreams returns the maximum number of concurrent streams
-func (m *Multiplexer) GetMaxConcurrentStreams() uint32 {
+func (m *Framer) GetMaxConcurrentStreams() uint32 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.maxConcurrentStreams
 }
 
 // SendFrame sends a frame
-func (m *Multiplexer) SendFrame(frame *Frame) error {
+func (m *Framer) SendFrame(frame *Frame) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -79,7 +79,7 @@ func (m *Multiplexer) SendFrame(frame *Frame) error {
 }
 
 // ReceiveFrame receives a frame
-func (m *Multiplexer) ReceiveFrame() (*Frame, error) {
+func (m *Framer) ReceiveFrame() (*Frame, error) {
 	frame := &Frame{}
 	err := frame.Decode(m.conn)
 	if err != nil {
@@ -91,7 +91,7 @@ func (m *Multiplexer) ReceiveFrame() (*Frame, error) {
 // CreateStream creates a new stream
 // Clients create odd streams (1, 3, 5...), servers create even streams (2, 4, 6...)
 // Returns stream ID and data channel, or error if maximum stream limit is reached
-func (m *Multiplexer) CreateStream() (uint32, chan []byte, error) {
+func (m *Framer) CreateStream() (uint32, chan []byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -143,7 +143,7 @@ func (m *Multiplexer) CreateStream() (uint32, chan []byte, error) {
 
 // ValidateStreamID validates if a stream ID is valid
 // Checks if stream ID is 0 (reserved) and if it matches direction requirements
-func (m *Multiplexer) ValidateStreamID(streamID uint32) error {
+func (m *Framer) ValidateStreamID(streamID uint32) error {
 	if streamID == ControlStreamID {
 		return ErrInvalidStreamID
 	}
@@ -165,7 +165,7 @@ func (m *Multiplexer) ValidateStreamID(streamID uint32) error {
 }
 
 // CloseStream closes a stream
-func (m *Multiplexer) CloseStream(streamID uint32) {
+func (m *Framer) CloseStream(streamID uint32) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
