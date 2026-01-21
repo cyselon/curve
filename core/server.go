@@ -6,8 +6,7 @@ import (
 )
 
 type Handler interface {
-	HandlePacket(packet *Frame, mux *Multiplexer)
-	Multiplexer(conn net.Conn) *Multiplexer
+	ServeConn(conn Connection)
 }
 
 type Server struct {
@@ -41,15 +40,15 @@ func (s *Server) Start() {
 		}
 
 		// Handle each connection in a separate goroutine
-		go s.handleConnection(conn)
+		go s.serveConn(conn)
 	}
 }
 
-// handleConnection handles client connections
-func (s *Server) handleConnection(conn net.Conn) {
+// serveConn handles client connections
+func (s *Server) serveConn(conn net.Conn) {
 	defer conn.Close()
 
-	mux := s.handler.Multiplexer(conn)
+	mux := s.handler.Framer(conn)
 	fmt.Printf("Client connected from %s\n", conn.RemoteAddr())
 
 	// Simple echo of all received frames

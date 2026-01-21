@@ -13,19 +13,29 @@ const (
 	MaxFrameDataSize = 64 * 1024 // 64KB
 )
 
+// Connection is the interface for a connection
+// It is a wrapper for a TCP connection that implements the Reader/Writer interfaces
+// Use to read write data in frames
+type Connection interface {
+	Read(p []byte) (n int, err error)
+	Write(p []byte) (n int, err error)
+	Close() error
+	StreamID() uint32
+}
+
 // Stream represents an active stream with independent Reader/Writer interfaces
 type Stream struct {
-	streamID uint32      // stream ID
-	conn     *Connection // parent connection
-	readBuf  []byte      // read buffer
-	readMu   sync.Mutex  // read mutex
-	readCond *sync.Cond  // read condition variable for waiting data
-	closed   bool        // whether stream is closed
-	closeMu  sync.Mutex  // close mutex
+	streamID uint32          // stream ID
+	conn     *connectionImpl // parent connection
+	readBuf  []byte          // read buffer
+	readMu   sync.Mutex      // read mutex
+	readCond *sync.Cond      // read condition variable for waiting data
+	closed   bool            // whether stream is closed
+	closeMu  sync.Mutex      // close mutex
 }
 
 // newStream creates a new stream
-func newStream(streamID uint32, conn *Connection) *Stream {
+func newStream(streamID uint32, conn *connectionImpl) *Stream {
 	s := &Stream{
 		streamID: streamID,
 		conn:     conn,
@@ -116,12 +126,12 @@ func (s *Stream) writeFrame(data []byte) {
 	s.readCond.Signal()
 }
 
-// Connection wraps a TCP connection and implements Reader/Writer interfaces via Multiplexer
+// Connection wraps a TCP connectionImpl and implements Reader/Writer interfaces via Framer
 // Connection splits data into frames for transmission and collects frames to reconstruct data
 // Connection manages multiple active streams
-type Connection struct {
+type connectionImpl struct {
 	conn        net.Conn           // underlying TCP connection
-	mux         *Multiplexer       // multiplexer
+	mux         *Framer            // Framer
 	streams     map[uint32]*Stream // map of active streams
 	streamsMu   sync.RWMutex       // streams map mutex
 	closed      bool               // whether connection is closed
@@ -132,10 +142,10 @@ type Connection struct {
 
 // NewConnection creates a new Connection
 // isClient: true for client (uses odd streams), false for server (uses even streams)
-func NewConnection(conn net.Conn, isClient bool) *Connection {
-	mux := NewMultiplexer(conn, isClient)
+func NewConnection(conn net.Conn, isClient bool) Connection {
+	mux := NewFramer(conn, isClient)
 
-	c := &Connection{
+	c := &connectionImpl{
 		conn:        conn,
 		mux:         mux,
 		streams:     make(map[uint32]*Stream),
@@ -151,7 +161,7 @@ func NewConnection(conn net.Conn, isClient bool) *Connection {
 }
 
 // receiveFrames receives frames in background and distributes them to corresponding streams
-func (c *Connection) receiveFrames() {
+func (c *connectionImpl) receiveFrames() {
 	defer close(c.receiveDone)
 
 	for {
@@ -195,7 +205,7 @@ func (c *Connection) receiveFrames() {
 }
 
 // OpenStream creates a new stream and returns it
-func (c *Connection) OpenStream() (*Stream, error) {
+func (c *connectionImpl) OpenStream() (*Stream, error) {
 	c.closeMu.Lock()
 	if c.closed {
 		c.closeMu.Unlock()
@@ -220,7 +230,7 @@ func (c *Connection) OpenStream() (*Stream, error) {
 }
 
 // CloseStream closes the specified stream
-func (c *Connection) CloseStream(streamID uint32) error {
+func (c *connectionImpl) CloseStream(streamID uint32) error {
 	c.streamsMu.Lock()
 	stream, exists := c.streams[streamID]
 	if exists {
@@ -239,7 +249,7 @@ func (c *Connection) CloseStream(streamID uint32) error {
 }
 
 // writeToStream writes data to the specified stream (called by Stream.Write)
-func (c *Connection) writeToStream(streamID uint32, p []byte) (n int, err error) {
+func (c *connectionImpl) writeToStream(streamID uint32, p []byte) (n int, err error) {
 	c.closeMu.Lock()
 	if c.closed {
 		c.closeMu.Unlock()
@@ -281,7 +291,7 @@ func (c *Connection) writeToStream(streamID uint32, p []byte) (n int, err error)
 
 // Read implements io.Reader interface (uses default stream, backward compatible)
 // Note: It's recommended to use OpenStream() to create independent streams
-func (c *Connection) Read(p []byte) (n int, err error) {
+func (c *connectionImpl) Read(p []byte) (n int, err error) {
 	// Get or create default stream
 	stream, err := c.getOrCreateDefaultStream()
 	if err != nil {
@@ -292,7 +302,7 @@ func (c *Connection) Read(p []byte) (n int, err error) {
 
 // Write implements io.Writer interface (uses default stream, backward compatible)
 // Note: It's recommended to use OpenStream() to create independent streams
-func (c *Connection) Write(p []byte) (n int, err error) {
+func (c *connectionImpl) Write(p []byte) (n int, err error) {
 	stream, err := c.getOrCreateDefaultStream()
 	if err != nil {
 		return 0, err
@@ -301,7 +311,7 @@ func (c *Connection) Write(p []byte) (n int, err error) {
 }
 
 // getOrCreateDefaultStream gets or creates the default stream
-func (c *Connection) getOrCreateDefaultStream() (*Stream, error) {
+func (c *connectionImpl) getOrCreateDefaultStream() (*Stream, error) {
 	var defaultStreamID uint32
 	if c.isClient {
 		defaultStreamID = 1
@@ -340,7 +350,7 @@ func (c *Connection) getOrCreateDefaultStream() (*Stream, error) {
 }
 
 // Close closes the connection and all active streams
-func (c *Connection) Close() error {
+func (c *connectionImpl) Close() error {
 	c.closeMu.Lock()
 	if c.closed {
 		c.closeMu.Unlock()
@@ -374,37 +384,37 @@ func (c *Connection) Close() error {
 }
 
 // LocalAddr returns the local network address
-func (c *Connection) LocalAddr() net.Addr {
+func (c *connectionImpl) LocalAddr() net.Addr {
 	return c.conn.LocalAddr()
 }
 
 // RemoteAddr returns the remote network address
-func (c *Connection) RemoteAddr() net.Addr {
+func (c *connectionImpl) RemoteAddr() net.Addr {
 	return c.conn.RemoteAddr()
 }
 
 // SetDeadline sets the read and write deadlines
-func (c *Connection) SetDeadline(t time.Time) error {
+func (c *connectionImpl) SetDeadline(t time.Time) error {
 	return c.conn.SetDeadline(t)
 }
 
 // SetReadDeadline sets the read deadline
-func (c *Connection) SetReadDeadline(t time.Time) error {
+func (c *connectionImpl) SetReadDeadline(t time.Time) error {
 	return c.conn.SetReadDeadline(t)
 }
 
 // SetWriteDeadline sets the write deadline
-func (c *Connection) SetWriteDeadline(t time.Time) error {
+func (c *connectionImpl) SetWriteDeadline(t time.Time) error {
 	return c.conn.SetWriteDeadline(t)
 }
 
-// GetMultiplexer returns the internal Multiplexer
-func (c *Connection) GetMultiplexer() *Multiplexer {
+// GetFramer returns the internal Framer
+func (c *connectionImpl) GetFramer() *Framer {
 	return c.mux
 }
 
 // GetActiveStreams returns all active stream IDs
-func (c *Connection) GetActiveStreams() []uint32 {
+func (c *connectionImpl) GetActiveStreams() []uint32 {
 	c.streamsMu.RLock()
 	defer c.streamsMu.RUnlock()
 
@@ -416,7 +426,7 @@ func (c *Connection) GetActiveStreams() []uint32 {
 }
 
 // GetStream returns the stream by stream ID
-func (c *Connection) GetStream(streamID uint32) (*Stream, bool) {
+func (c *connectionImpl) GetStream(streamID uint32) (*Stream, bool) {
 	c.streamsMu.RLock()
 	defer c.streamsMu.RUnlock()
 	stream, exists := c.streams[streamID]
