@@ -1,38 +1,5 @@
 package core
 
-import (
-	"net"
-)
-
 type Client struct {
-	conn net.Conn
-}
-
-func NewClient(addr string) (*Client, error) {
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		return nil, err
-	}
-
-	return &Client{conn: conn}, nil
-}
-
-func (c *Client) SendPacket(streamID uint32, data []byte) error {
-	frame := &Frame{
-		Header: Header{
-			Version:  FrameVersion,
-			Flags:    FrameFlags,
-			StreamID: streamID,
-			Length:   uint32(len(data)),
-		},
-		Data: data,
-	}
-
-	encoded := frame.Encode()
-	_, err := c.conn.Write(encoded)
-	return err
-}
-
-func (c *Client) Close() error {
-	return c.conn.Close()
+	mgr *SessionManager
 }
