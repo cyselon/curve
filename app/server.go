@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 
 	"curve/core"
 )
@@ -72,7 +73,7 @@ func (s *MplHandler) ServeConn(conn *core.Connection) {
 	// here we create a even stream for demonstration
 	stream, err := conn.CreateStream()
 	if err != nil {
-		fmt.Printf("Error creating stream: %v\n", err)
+		slog.Error("Error creating stream:", "error", err)
 		return
 	}
 	defer stream.Close()
@@ -85,7 +86,7 @@ func (s *MplHandler) ServeConn(conn *core.Connection) {
 			if err == io.EOF {
 				break
 			}
-			fmt.Printf("Error reading from stream: %v\n", err)
+			slog.Error("Error reading from stream:", "error", err)
 			break
 		}
 
@@ -98,21 +99,21 @@ func (s *MplHandler) ServeConn(conn *core.Connection) {
 func (s *MplHandler) handleData(data []byte, stream *core.Stream, conn *core.Connection) {
 	var cmd Command
 	if err := json.Unmarshal(data, &cmd); err != nil {
-		fmt.Printf("Error decoding command: %v, stream: %d, size: %d, data: %s\n", err, stream.ID(), len(data), string(data))
+		slog.Error("Error decoding command:", "error", err, "stream", stream.ID(), "size", len(data), "data", string(data))
 		return
 	}
 
 	// execute command logic
 	switch cmd.Action {
 	case "ping":
-		fmt.Println("Received ping command")
+		slog.Info("Received ping command")
 		response := map[string]any{"message": "pong"}
 		s.sendResponse(stream, response)
 	case "upload":
-		fmt.Println("Received upload command")
+		slog.Info("Received upload command")
 		// handle upload logic
 	default:
-		fmt.Println("Unknown command:", cmd.Action)
+		slog.Info("Unknown command:", "command", cmd.Action)
 	}
 }
 
@@ -120,13 +121,13 @@ func (s *MplHandler) handleData(data []byte, stream *core.Stream, conn *core.Con
 func (s *MplHandler) sendResponse(stream *core.Stream, data map[string]interface{}) {
 	response, err := json.Marshal(data)
 	if err != nil {
-		fmt.Println("Error encoding response:", err)
+		slog.Error("Error encoding response:", "error", err)
 		return
 	}
 
 	// use stream's Write method to send response
 	_, err = stream.Write(response)
 	if err != nil {
-		fmt.Println("Error sending response:", err)
+		slog.Error("Error sending response:", "error", err)
 	}
 }
