@@ -1,6 +1,7 @@
 package core
 
 import (
+	"log/slog"
 	"net"
 )
 
@@ -50,7 +51,7 @@ func (s *Server) Serve() error {
 		if err != nil {
 			return err
 		}
-
+		slog.Debug("Accepted connection", "remote address", netConn.RemoteAddr())
 		// Create connection (server side, uses even streams)
 		conn := NewConnection(netConn, false)
 		conn.Start()
@@ -62,6 +63,7 @@ func (s *Server) Serve() error {
 
 		// Add session to manager using remote address as key
 		key := netConn.RemoteAddr().String()
+		slog.Debug("Added session", "remote address", key)
 		s.mgr.AddSession(key, session)
 
 		// Handle connection
