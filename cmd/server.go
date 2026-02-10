@@ -6,6 +6,8 @@ package cmd
 import (
 	"curve/app"
 	"curve/core"
+	"fmt"
+	"log"
 
 	"github.com/spf13/cobra"
 )
@@ -20,8 +22,17 @@ var serverCmd = &cobra.Command{
 The server listens on the specified address and handles incoming commands.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		handler := app.NewMplHandler()
-		server := core.NewServer(serverAddr, handler)
-		server.Start()
+		server := core.NewServer()
+		server.SetHandler(handler)
+
+		if err := server.Listen("tcp", serverAddr); err != nil {
+			log.Fatalf("Failed to listen on %s: %v", serverAddr, err)
+		}
+
+		fmt.Printf("Server listening on %s\n", serverAddr)
+		if err := server.Serve(); err != nil {
+			log.Fatalf("Server error: %v", err)
+		}
 	},
 }
 
