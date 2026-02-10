@@ -114,9 +114,48 @@ func (c *Connection) readLoop() {
 		} else if frame.StreamID == ControlStreamID {
 			// Handle control frames
 			// TODO: implement control frame handling
+		} else {
+			// Auto-create stream for incoming frames from the other side
+			// Client creates odd streams, server receives them
+			// Server creates even streams, client receives them
+			isIncomingStream := false
+			if c.isClient {
+				// Client receives even streams from server
+				isIncomingStream = frame.StreamID%2 == 0
+			} else {
+				// Server receives odd streams from client
+				isIncomingStream = frame.StreamID%2 != 0
+			}
+
+			if isIncomingStream {
+				// Create stream for receiving data
+				c.mu.Lock()
+				// Check again after acquiring lock
+				if _, stillExists := c.streams[frame.StreamID]; !stillExists {
+					// Check stream limit
+					if uint32(len(c.streams)) < c.maxConcurrentStreams {
+						stream = &Stream{
+							id:      frame.StreamID,
+							conn:    c,
+							readBuf: make(chan []byte, 10),
+							closeCh: make(chan struct{}),
+						}
+						c.streams[frame.StreamID] = stream
+					}
+				} else {
+					stream = c.streams[frame.StreamID]
+				}
+				c.mu.Unlock()
+
+				if stream != nil {
+					select {
+					case stream.readBuf <- frame.Payload:
+					case <-c.done:
+						return
+					}
+				}
+			}
 		}
-		// If stream doesn't exist and it's not control, we might want to create it
-		// or ignore it depending on the protocol
 	}
 }
 

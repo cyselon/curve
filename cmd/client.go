@@ -4,11 +4,12 @@ Copyright © 2026 NAME HERE <EMAIL ADDRESS>
 package cmd
 
 import (
-	"curve/app"
 	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
+
+	"curve/app"
 )
 
 var clientServerAddr string
@@ -20,9 +21,9 @@ var clientCmd = &cobra.Command{
 	Long: `Start the curve client to connect to a server.
 The client connects to the specified server address and can send commands.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		client := app.NewClient(clientServerAddr)
-		if client == nil {
-			fmt.Println("Failed to create client")
+		client, err := app.NewClient(clientServerAddr)
+		if err != nil {
+			fmt.Printf("Failed to create client: %v\n", err)
 			os.Exit(1)
 		}
 		defer client.Close()
