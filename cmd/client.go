@@ -30,6 +30,7 @@ The client connects to the specified server address and can send commands.`,
 
 		fmt.Printf("Connected to server at %s\n", clientServerAddr)
 		fmt.Println("Client is ready. Use the client API to send commands.")
+
 	},
 }
 
