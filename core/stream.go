@@ -13,13 +13,13 @@ const (
 // Stream represents an active stream with independent Reader/Writer interfaces
 // It implements io.ReadWriteCloser
 type Stream struct {
-	id       uint32
-	conn     *Connection   // parent connection
-	readBuf  chan []byte   // data channel from connection
-	closeCh  chan struct{} // close channel
-	closed   bool
-	mu       sync.Mutex
-	buffer   []byte // internal buffer for partial reads
+	closed  bool
+	id      uint32
+	conn    *Connection   // parent connection
+	readBuf chan []byte   // data channel from connection
+	closeCh chan struct{} // close channel
+	mu      sync.Mutex
+	buffer  []byte // internal buffer for partial reads
 }
 
 // Read reads data from the stream
