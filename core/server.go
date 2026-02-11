@@ -68,6 +68,7 @@ func (s *Server) Serve() error {
 
 		// Handle connection
 		if s.handler != nil {
+			slog.Info("Serving connection", "remote address", netConn.RemoteAddr())
 			go s.handler.ServeConn(conn)
 		}
 	}

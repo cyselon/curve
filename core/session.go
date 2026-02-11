@@ -5,6 +5,7 @@ import "sync"
 // Session represents a session with a server
 // It is a virtual connection to the server
 type Session struct {
+	id   string
 	conn *Connection
 	// session level configuration, such as timeout, heartbeat detection
 }
@@ -27,6 +28,7 @@ func NewSessionManager() *SessionManager {
 func (sm *SessionManager) AddSession(key string, session *Session) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+	session.id = key
 	sm.sessions[key] = session
 }
 
@@ -74,4 +76,8 @@ func (s *Session) CreateStream() (*Stream, error) {
 // GetConnection returns the underlying connection
 func (s *Session) GetConnection() *Connection {
 	return s.conn
+}
+
+func (s *Session) ID() string {
+	return s.id
 }
