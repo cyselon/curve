@@ -66,21 +66,18 @@ func NewMplHandler() *MplHandler {
 }
 
 // ServeConn implements core.Handler interface, handling connection
-// server will receive data from client created odd stream
-// Connection's readLoop will automatically create the receiving stream
-// here we create a server side stream for demonstration, in actual application, should handle client created stream
+// Reads from IncomingStreams() - streams auto-created when client sends data (odd stream IDs)
 func (s *MplHandler) ServeConn(conn *core.Connection) {
-	// create a server side stream for handling request
-	// note: in actual application, should handle client created odd stream
-	// here we create a even stream for demonstration
-	stream, err := conn.CreateStream()
-	if err != nil {
-		slog.Error("Error creating stream:", "error", err)
-		return
+	for stream := range conn.IncomingStreams() {
+		// Handle each client-initiated stream in a goroutine
+		go s.handleStream(stream)
 	}
+}
+
+// handleStream reads data from a stream and processes commands
+func (s *MplHandler) handleStream(stream *core.Stream) {
 	defer stream.Close()
 
-	// read data and handle
 	buf := make([]byte, 4096)
 	for {
 		n, err := stream.Read(buf)

@@ -40,9 +40,10 @@ type Connection struct {
 	isClient             bool // true for client (uses odd streams), false for server (uses even streams)
 
 	// signal and channel
-	writeCh chan *Frame // all streams share this write channel
-	done    chan struct{}
-	once    sync.Once
+	writeCh          chan *Frame // all streams share this write channel
+	done             chan struct{}
+	once             sync.Once
+	incomingStreamCh chan *Stream // receives streams when auto-created from incoming data
 }
 
 // NewConnection creates a new connection
@@ -64,6 +65,7 @@ func NewConnection(netConn net.Conn, isClient bool) *Connection {
 		isClient:             isClient,
 		writeCh:               make(chan *Frame, 100),
 		done:                  make(chan struct{}),
+		incomingStreamCh:     make(chan *Stream, 32),
 	}
 }
 
@@ -129,6 +131,7 @@ func (c *Connection) readLoop() {
 
 			if isIncomingStream {
 				// Create stream for receiving data
+				isNewStream := false
 				c.mu.Lock()
 				// Check again after acquiring lock
 				if _, stillExists := c.streams[frame.StreamID]; !stillExists {
@@ -141,6 +144,7 @@ func (c *Connection) readLoop() {
 							closeCh: make(chan struct{}),
 						}
 						c.streams[frame.StreamID] = stream
+						isNewStream = true
 					}
 				} else {
 					stream = c.streams[frame.StreamID]
@@ -148,6 +152,16 @@ func (c *Connection) readLoop() {
 				c.mu.Unlock()
 
 				if stream != nil {
+					// Notify handler of new stream (non-blocking)
+					if isNewStream && c.incomingStreamCh != nil {
+						select {
+						case c.incomingStreamCh <- stream:
+						case <-c.done:
+							return
+						default:
+							// channel full, handler will poll GetStream if needed
+						}
+					}
 					select {
 					case stream.readBuf <- frame.Payload:
 					case <-c.done:
@@ -267,11 +281,23 @@ func (c *Connection) WriteFrame(frame *Frame) error {
 	}
 }
 
+// IncomingStreams returns a channel that receives streams when they are auto-created
+// from incoming data (e.g. server receives odd streams from client).
+// Handler should read from this to process client-initiated streams.
+func (c *Connection) IncomingStreams() <-chan *Stream {
+	return c.incomingStreamCh
+}
+
 // Close closes the connection and all streams
 func (c *Connection) Close() error {
 	c.once.Do(func() {
 		close(c.done)
 		c.netConn.Close()
+
+		// Close incoming stream channel so handler's range loop exits
+		if c.incomingStreamCh != nil {
+			close(c.incomingStreamCh)
+		}
 
 		// Close all streams
 		c.mu.Lock()
