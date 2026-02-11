@@ -28,6 +28,7 @@ func NewClient(server string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial server: %w", err)
 	}
+	slog.Info("Connected to server:", "server", server, "session", session.ID())
 	return &Client{
 		Client:  client,
 		session: session,
@@ -36,6 +37,7 @@ func NewClient(server string) (*Client, error) {
 
 // SendCommand sends a command
 func (c *Client) SendCommand(cmd *Command) error {
+	slog.Info("Sending command:", "command", cmd)
 	// create stream
 	stream, err := c.session.CreateStream()
 	if err != nil {
@@ -84,6 +86,7 @@ func (s *MplHandler) ServeConn(conn *core.Connection) {
 		n, err := stream.Read(buf)
 		if err != nil {
 			if err == io.EOF {
+				slog.Info("EOF reading from stream:", "stream", stream.ID())
 				break
 			}
 			slog.Error("Error reading from stream:", "error", err)
@@ -91,18 +94,18 @@ func (s *MplHandler) ServeConn(conn *core.Connection) {
 		}
 
 		// handle received data
-		s.handleData(buf[:n], stream, conn)
+		s.handleData(buf[:n], stream)
 	}
 }
 
 // handleData handles received data
-func (s *MplHandler) handleData(data []byte, stream *core.Stream, conn *core.Connection) {
+func (s *MplHandler) handleData(data []byte, stream *core.Stream) {
 	var cmd Command
 	if err := json.Unmarshal(data, &cmd); err != nil {
 		slog.Error("Error decoding command:", "error", err, "stream", stream.ID(), "size", len(data), "data", string(data))
 		return
 	}
-
+	slog.Info("Received command:", "command", cmd.Action, "stream", stream.ID())
 	// execute command logic
 	switch cmd.Action {
 	case "ping":
