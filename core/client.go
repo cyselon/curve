@@ -4,35 +4,45 @@ import (
 	"net"
 )
 
+// Client represents a client that can connect to a server
+// It is the entry point for client-side operations
 type Client struct {
-	conn net.Conn
+	// session manager
+	mgr *SessionManager
 }
 
-func NewClient(addr string) (*Client, error) {
-	conn, err := net.Dial("tcp", addr)
+// NewClient creates a new client
+func NewClient() *Client {
+	return &Client{
+		mgr: NewSessionManager(),
+	}
+}
+
+// Dial connects to a server at the given address and returns a Session
+func (c *Client) Dial(network, address string) (*Session, error) {
+	netConn, err := net.Dial(network, address)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Client{conn: conn}, nil
-}
+	// Create connection (client side, uses odd streams)
+	conn := NewConnection(netConn, true)
+	conn.Start()
 
-func (c *Client) SendPacket(streamID uint32, data []byte) error {
-	frame := &Frame{
-		Header: Header{
-			Version:  FrameVersion,
-			Flags:    FrameFlags,
-			StreamID: streamID,
-			Length:   uint32(len(data)),
-		},
-		Data: data,
+	// Create session
+	session := &Session{
+		conn: conn,
 	}
 
-	encoded := frame.Encode()
-	_, err := c.conn.Write(encoded)
-	return err
+	// Add session to manager using remote address as key
+	key := netConn.RemoteAddr().String()
+	c.mgr.AddSession(key, session)
+
+	return session, nil
 }
 
+// Close closes all sessions managed by this client
 func (c *Client) Close() error {
-	return c.conn.Close()
+	c.mgr.CloseAll()
+	return nil
 }

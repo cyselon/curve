@@ -5,63 +5,62 @@ import (
 	"io"
 )
 
-type Frame struct {
-	Header Header
-	Data   []byte
-}
-
-type Header struct {
-	Version  uint8
-	Flags    uint8
-	StreamID uint32
-	Length   uint32
-}
+// FrameType is the type of frame
+type FrameType byte
 
 const (
-	FrameVersion = 1
-	FrameFlags   = 0
+	FrameData    FrameType = iota // data frame
+	FrameControl                  // control frame (e.g. window update, PING)
 )
 
-func (frame *Frame) Encode() []byte {
-	// Encode frame: 1 byte Version + 1 byte Flags + 4 bytes StreamID + 4 bytes Length + data
-	headerSize := 10 // 1 + 1 + 4 + 4
-	buf := make([]byte, headerSize+len(frame.Data))
+// Frame is the basic unit of data transmission
+// Binary format:
+//   StreamID: 4 bytes (uint32, big-endian)
+//   Type: 1 byte
+//   Flags: 1 byte
+//   PayloadLen: 4 bytes (uint32, big-endian)
+//   Payload: PayloadLen bytes
+type Frame struct {
+	StreamID uint32
+	Type     FrameType
+	Flags    byte
+	Payload  []byte
+}
 
-	offset := 0
-	buf[offset] = frame.Header.Version
-	offset++
-	buf[offset] = frame.Header.Flags
-	offset++
-	binary.BigEndian.PutUint32(buf[offset:offset+4], frame.Header.StreamID)
-	offset += 4
-	binary.BigEndian.PutUint32(buf[offset:offset+4], frame.Header.Length)
-	offset += 4
-	copy(buf[offset:], frame.Data)
-
+// Encode encodes the frame into bytes
+func (f *Frame) Encode() []byte {
+	payloadLen := uint32(len(f.Payload))
+	buf := make([]byte, 10+payloadLen) // 4+1+1+4+payloadLen
+	
+	binary.BigEndian.PutUint32(buf[0:4], f.StreamID)
+	buf[4] = byte(f.Type)
+	buf[5] = f.Flags
+	binary.BigEndian.PutUint32(buf[6:10], payloadLen)
+	copy(buf[10:], f.Payload)
+	
 	return buf
 }
 
-func (frame *Frame) Decode(r io.Reader) error {
-	// Read fixed 10-byte header: 1 byte Version + 1 byte Flags + 4 bytes StreamID + 4 bytes Length
+// Decode decodes bytes from reader into the frame
+func (f *Frame) Decode(r io.Reader) error {
 	header := make([]byte, 10)
 	if _, err := io.ReadFull(r, header); err != nil {
 		return err
 	}
-
-	offset := 0
-	frame.Header.Version = header[offset]
-	offset++
-	frame.Header.Flags = header[offset]
-	offset++
-	frame.Header.StreamID = binary.BigEndian.Uint32(header[offset : offset+4])
-	offset += 4
-	frame.Header.Length = binary.BigEndian.Uint32(header[offset : offset+4])
-
-	// Read actual data
-	data := make([]byte, frame.Header.Length)
-	if _, err := io.ReadFull(r, data); err != nil {
-		return err
+	
+	f.StreamID = binary.BigEndian.Uint32(header[0:4])
+	f.Type = FrameType(header[4])
+	f.Flags = header[5]
+	payloadLen := binary.BigEndian.Uint32(header[6:10])
+	
+	if payloadLen > 0 {
+		f.Payload = make([]byte, payloadLen)
+		if _, err := io.ReadFull(r, f.Payload); err != nil {
+			return err
+		}
+	} else {
+		f.Payload = nil
 	}
-	frame.Data = data
+	
 	return nil
 }

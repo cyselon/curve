@@ -1,434 +1,312 @@
 package core
 
 import (
+	"errors"
 	"io"
 	"net"
 	"sync"
-	"time"
 )
 
 const (
-	// MaxFrameDataSize is the maximum frame data size (excluding header)
-	// If data exceeds this size, it will be split into multiple frames
-	MaxFrameDataSize = 64 * 1024 // 64KB
+	// DefaultMaxConcurrentStreams is the default maximum number of concurrent streams
+	DefaultMaxConcurrentStreams = 100
+	// ControlStreamID is reserved for control stream
+	ControlStreamID = 0
 )
 
-// Connection is the interface for a connection
-// It is a wrapper for a TCP connection that implements the Reader/Writer interfaces
-// Use to read write data in frames
-type Connection interface {
-	Read(p []byte) (n int, err error)
-	Write(p []byte) (n int, err error)
-	Close() error
-	StreamID() uint32
+var (
+	// ErrMaxStreamsReached indicates the maximum number of streams has been reached
+	ErrMaxStreamsReached = errors.New("maximum concurrent streams reached")
+	// ErrInvalidStreamID indicates an invalid stream ID (stream 0 is reserved)
+	ErrInvalidStreamID = errors.New("invalid stream ID: stream 0 is reserved for control")
+	// ErrStreamDirectionMismatch indicates stream direction mismatch
+	ErrStreamDirectionMismatch = errors.New("stream direction mismatch")
+	// ErrConnectionClosed indicates the connection is closed
+	ErrConnectionClosed = errors.New("connection closed")
+)
+
+// Connection represents a connection to a server
+// It manages the physical net.Conn, handles stream lifecycle, read/write loops,
+// and dispatches frames to the correct Stream
+type Connection struct {
+	netConn net.Conn
+	framer  *Framer
+
+	// stream management
+	mu                  sync.RWMutex
+	streams             map[uint32]*Stream
+	nextStreamID        uint32
+	maxConcurrentStreams uint32
+	isClient             bool // true for client (uses odd streams), false for server (uses even streams)
+
+	// signal and channel
+	writeCh          chan *Frame // all streams share this write channel
+	done             chan struct{}
+	once             sync.Once
+	incomingStreamCh chan *Stream // receives streams when auto-created from incoming data
 }
 
-// Stream represents an active stream with independent Reader/Writer interfaces
-type Stream struct {
-	streamID uint32          // stream ID
-	conn     *connectionImpl // parent connection
-	readBuf  []byte          // read buffer
-	readMu   sync.Mutex      // read mutex
-	readCond *sync.Cond      // read condition variable for waiting data
-	closed   bool            // whether stream is closed
-	closeMu  sync.Mutex      // close mutex
-}
-
-// newStream creates a new stream
-func newStream(streamID uint32, conn *connectionImpl) *Stream {
-	s := &Stream{
-		streamID: streamID,
-		conn:     conn,
-		readBuf:  make([]byte, 0),
-		closed:   false,
-	}
-	s.readCond = sync.NewCond(&s.readMu)
-	return s
-}
-
-// Read reads data from the stream
-func (s *Stream) Read(p []byte) (n int, err error) {
-	if len(p) == 0 {
-		return 0, nil
-	}
-
-	s.closeMu.Lock()
-	if s.closed {
-		s.closeMu.Unlock()
-		return 0, io.EOF
-	}
-	s.closeMu.Unlock()
-
-	// Read from buffer
-	s.readMu.Lock()
-	defer s.readMu.Unlock()
-
-	// Wait for data if buffer is empty
-	for len(s.readBuf) == 0 {
-		s.closeMu.Lock()
-		if s.closed {
-			s.closeMu.Unlock()
-			return 0, io.EOF
-		}
-		s.closeMu.Unlock()
-
-		// Wait for data to arrive (via condition variable)
-		s.readCond.Wait()
-	}
-
-	// Copy data from buffer
-	n = copy(p, s.readBuf)
-	s.readBuf = s.readBuf[n:]
-	return n, nil
-}
-
-// Write writes data to the stream
-func (s *Stream) Write(p []byte) (n int, err error) {
-	s.closeMu.Lock()
-	if s.closed {
-		s.closeMu.Unlock()
-		return 0, io.ErrClosedPipe
-	}
-	s.closeMu.Unlock()
-
-	return s.conn.writeToStream(s.streamID, p)
-}
-
-// Close closes the stream
-func (s *Stream) Close() error {
-	s.closeMu.Lock()
-	if s.closed {
-		s.closeMu.Unlock()
-		return nil
-	}
-	s.closed = true
-	s.closeMu.Unlock()
-
-	// Wake up waiting readers
-	s.readMu.Lock()
-	s.readCond.Broadcast()
-	s.readMu.Unlock()
-
-	return s.conn.CloseStream(s.streamID)
-}
-
-// StreamID returns the stream ID
-func (s *Stream) StreamID() uint32 {
-	return s.streamID
-}
-
-// writeFrame writes frame data to the stream's buffer (called internally by Connection)
-func (s *Stream) writeFrame(data []byte) {
-	s.readMu.Lock()
-	defer s.readMu.Unlock()
-	s.readBuf = append(s.readBuf, data...)
-	// Notify waiting readers
-	s.readCond.Signal()
-}
-
-// Connection wraps a TCP connectionImpl and implements Reader/Writer interfaces via Framer
-// Connection splits data into frames for transmission and collects frames to reconstruct data
-// Connection manages multiple active streams
-type connectionImpl struct {
-	conn        net.Conn           // underlying TCP connection
-	mux         *Framer            // Framer
-	streams     map[uint32]*Stream // map of active streams
-	streamsMu   sync.RWMutex       // streams map mutex
-	closed      bool               // whether connection is closed
-	closeMu     sync.Mutex         // close state mutex
-	receiveDone chan struct{}      // receive loop completion signal
-	isClient    bool               // whether this is a client
-}
-
-// NewConnection creates a new Connection
+// NewConnection creates a new connection
 // isClient: true for client (uses odd streams), false for server (uses even streams)
-func NewConnection(conn net.Conn, isClient bool) Connection {
-	mux := NewFramer(conn, isClient)
-
-	c := &connectionImpl{
-		conn:        conn,
-		mux:         mux,
-		streams:     make(map[uint32]*Stream),
-		closed:      false,
-		receiveDone: make(chan struct{}),
-		isClient:    isClient,
+func NewConnection(netConn net.Conn, isClient bool) *Connection {
+	var initialStream uint32
+	if isClient {
+		initialStream = 1 // client starts from 1 (odd)
+	} else {
+		initialStream = 2 // server starts from 2 (even)
 	}
 
-	// Start background frame receiving loop
-	go c.receiveFrames()
-
-	return c
+	return &Connection{
+		netConn:              netConn,
+		framer:               NewFramer(),
+		streams:               make(map[uint32]*Stream),
+		nextStreamID:          initialStream,
+		maxConcurrentStreams: DefaultMaxConcurrentStreams,
+		isClient:             isClient,
+		writeCh:               make(chan *Frame, 100),
+		done:                  make(chan struct{}),
+		incomingStreamCh:     make(chan *Stream, 32),
+	}
 }
 
-// receiveFrames receives frames in background and distributes them to corresponding streams
-func (c *connectionImpl) receiveFrames() {
-	defer close(c.receiveDone)
+// SetMaxConcurrentStreams sets the maximum number of concurrent streams
+func (c *Connection) SetMaxConcurrentStreams(max uint32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.maxConcurrentStreams = max
+}
+
+// Start starts the read and write loops
+func (c *Connection) Start() {
+	go c.readLoop()
+	go c.writeLoop()
+}
+
+// readLoop continuously reads frames from the connection and dispatches them to streams
+func (c *Connection) readLoop() {
+	defer c.Close()
 
 	for {
-		// Check if connection is closed
-		c.closeMu.Lock()
-		closed := c.closed
-		c.closeMu.Unlock()
-
-		if closed {
+		select {
+		case <-c.done:
 			return
+		default:
 		}
 
-		// Set read deadline to avoid permanent blocking
-		c.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-
-		// Receive frame
-		frame, err := c.mux.ReceiveFrame()
+		frame, err := c.framer.DecodeFrame(c.netConn)
 		if err != nil {
-			// Check if it's a timeout error
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				// Timeout, continue loop to check close status
-				continue
+			if err == io.EOF {
+				return
 			}
-			// Other errors (e.g., connection closed), exit loop
+			// Handle other errors, maybe log them
 			return
 		}
 
-		// Clear read deadline
-		c.conn.SetReadDeadline(time.Time{})
-
-		// Distribute frame to corresponding stream
-		c.streamsMu.RLock()
-		stream, exists := c.streams[frame.Header.StreamID]
-		c.streamsMu.RUnlock()
+		// Dispatch frame to the correct stream
+		c.mu.RLock()
+		stream, exists := c.streams[frame.StreamID]
+		c.mu.RUnlock()
 
 		if exists {
-			stream.writeFrame(frame.Data)
+			select {
+			case stream.readBuf <- frame.Payload:
+			case <-c.done:
+				return
+			}
+		} else if frame.StreamID == ControlStreamID {
+			// Handle control frames
+			// TODO: implement control frame handling
+		} else {
+			// Auto-create stream for incoming frames from the other side
+			// Client creates odd streams, server receives them
+			// Server creates even streams, client receives them
+			isIncomingStream := false
+			if c.isClient {
+				// Client receives even streams from server
+				isIncomingStream = frame.StreamID%2 == 0
+			} else {
+				// Server receives odd streams from client
+				isIncomingStream = frame.StreamID%2 != 0
+			}
+
+			if isIncomingStream {
+				// Create stream for receiving data
+				isNewStream := false
+				c.mu.Lock()
+				// Check again after acquiring lock
+				if _, stillExists := c.streams[frame.StreamID]; !stillExists {
+					// Check stream limit
+					if uint32(len(c.streams)) < c.maxConcurrentStreams {
+						stream = &Stream{
+							id:      frame.StreamID,
+							conn:    c,
+							readBuf: make(chan []byte, 10),
+							closeCh: make(chan struct{}),
+						}
+						c.streams[frame.StreamID] = stream
+						isNewStream = true
+					}
+				} else {
+					stream = c.streams[frame.StreamID]
+				}
+				c.mu.Unlock()
+
+				if stream != nil {
+					// Notify handler of new stream (non-blocking)
+					if isNewStream && c.incomingStreamCh != nil {
+						select {
+						case c.incomingStreamCh <- stream:
+						case <-c.done:
+							return
+						default:
+							// channel full, handler will poll GetStream if needed
+						}
+					}
+					select {
+					case stream.readBuf <- frame.Payload:
+					case <-c.done:
+						return
+					}
+				}
+			}
 		}
-		// If stream doesn't exist, ignore the frame (may be from a closed stream)
 	}
 }
 
-// OpenStream creates a new stream and returns it
-func (c *connectionImpl) OpenStream() (*Stream, error) {
-	c.closeMu.Lock()
-	if c.closed {
-		c.closeMu.Unlock()
-		return nil, io.ErrClosedPipe
+// writeLoop continuously writes frames from the write channel to the connection
+func (c *Connection) writeLoop() {
+	defer c.Close()
+
+	for {
+		select {
+		case <-c.done:
+			return
+		case frame := <-c.writeCh:
+			if frame == nil {
+				return
+			}
+			buf := c.framer.EncodeFrame(frame)
+			if _, err := c.netConn.Write(buf); err != nil {
+				return
+			}
+		}
 	}
-	c.closeMu.Unlock()
-
-	// Create new stream
-	streamID, _, err := c.mux.CreateStream()
-	if err != nil {
-		return nil, err
-	}
-
-	newStream := newStream(streamID, c)
-
-	// Register stream
-	c.streamsMu.Lock()
-	c.streams[streamID] = newStream
-	c.streamsMu.Unlock()
-
-	return newStream, nil
 }
 
-// CloseStream closes the specified stream
-func (c *connectionImpl) CloseStream(streamID uint32) error {
-	c.streamsMu.Lock()
-	stream, exists := c.streams[streamID]
-	if exists {
-		delete(c.streams, streamID)
-	}
-	c.streamsMu.Unlock()
+// CreateStream creates a new stream
+// Returns the stream or error if maximum stream limit is reached
+func (c *Connection) CreateStream() (*Stream, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	if exists {
-		stream.closeMu.Lock()
-		stream.closed = true
-		stream.closeMu.Unlock()
-		c.mux.CloseStream(streamID)
+	// Check if maximum stream limit is reached
+	if uint32(len(c.streams)) >= c.maxConcurrentStreams {
+		return nil, ErrMaxStreamsReached
 	}
 
-	return nil
-}
+	// Find next valid stream ID
+	var streamID uint32
+	for {
+		streamID = c.nextStreamID
 
-// writeToStream writes data to the specified stream (called by Stream.Write)
-func (c *connectionImpl) writeToStream(streamID uint32, p []byte) (n int, err error) {
-	c.closeMu.Lock()
-	if c.closed {
-		c.closeMu.Unlock()
-		return 0, io.ErrClosedPipe
-	}
-	c.closeMu.Unlock()
-
-	totalWritten := 0
-
-	// If data is too large, split it into multiple frames
-	for len(p) > 0 {
-		chunkSize := MaxFrameDataSize
-		if len(p) < MaxFrameDataSize {
-			chunkSize = len(p)
+		// Ensure stream ID is not 0 (0 is reserved for control stream)
+		if streamID == ControlStreamID {
+			streamID++
 		}
 
-		chunk := p[:chunkSize]
-		p = p[chunkSize:]
-
-		frame := &Frame{
-			Header: Header{
-				Version:  FrameVersion,
-				Flags:    FrameFlags,
-				StreamID: streamID,
-				Length:   uint32(len(chunk)),
-			},
-			Data: chunk,
+		// Ensure stream ID matches direction requirements
+		if c.isClient {
+			// Client must use odd streams
+			if streamID%2 == 0 {
+				streamID++
+			}
+		} else {
+			// Server must use even streams
+			if streamID%2 != 0 {
+				streamID++
+			}
 		}
 
-		if err := c.mux.SendFrame(frame); err != nil {
-			return totalWritten, err
+		// Check if stream ID is already in use
+		if _, exists := c.streams[streamID]; !exists {
+			break
 		}
 
-		totalWritten += chunkSize
+		// Stream ID is already in use, try next
+		c.nextStreamID = streamID + 2 // Skip by 2 (to maintain odd/even)
 	}
 
-	return totalWritten, nil
-}
+	// Update next stream ID (skip by 2 to maintain odd/even)
+	c.nextStreamID = streamID + 2
 
-// Read implements io.Reader interface (uses default stream, backward compatible)
-// Note: It's recommended to use OpenStream() to create independent streams
-func (c *connectionImpl) Read(p []byte) (n int, err error) {
-	// Get or create default stream
-	stream, err := c.getOrCreateDefaultStream()
-	if err != nil {
-		return 0, err
-	}
-	return stream.Read(p)
-}
-
-// Write implements io.Writer interface (uses default stream, backward compatible)
-// Note: It's recommended to use OpenStream() to create independent streams
-func (c *connectionImpl) Write(p []byte) (n int, err error) {
-	stream, err := c.getOrCreateDefaultStream()
-	if err != nil {
-		return 0, err
-	}
-	return stream.Write(p)
-}
-
-// getOrCreateDefaultStream gets or creates the default stream
-func (c *connectionImpl) getOrCreateDefaultStream() (*Stream, error) {
-	var defaultStreamID uint32
-	if c.isClient {
-		defaultStreamID = 1
-	} else {
-		defaultStreamID = 2
+	// Create stream
+	stream := &Stream{
+		id:      streamID,
+		conn:    c,
+		readBuf: make(chan []byte, 10),
+		closeCh: make(chan struct{}),
 	}
 
-	c.streamsMu.RLock()
-	stream, exists := c.streams[defaultStreamID]
-	c.streamsMu.RUnlock()
-
-	if exists {
-		return stream, nil
-	}
-
-	// Create default stream
-	c.streamsMu.Lock()
-	// Double-check
-	if stream, exists := c.streams[defaultStreamID]; exists {
-		c.streamsMu.Unlock()
-		return stream, nil
-	}
-
-	// Create new stream
-	streamID, _, err := c.mux.CreateStream()
-	if err != nil {
-		c.streamsMu.Unlock()
-		return nil, err
-	}
-
-	stream = newStream(streamID, c)
 	c.streams[streamID] = stream
-	c.streamsMu.Unlock()
-
 	return stream, nil
 }
 
-// Close closes the connection and all active streams
-func (c *connectionImpl) Close() error {
-	c.closeMu.Lock()
-	if c.closed {
-		c.closeMu.Unlock()
-		return nil
-	}
-	c.closed = true
-	c.closeMu.Unlock()
-
-	// Close all streams
-	c.streamsMu.Lock()
-	for streamID, stream := range c.streams {
-		stream.closeMu.Lock()
-		stream.closed = true
-		stream.closeMu.Unlock()
-		c.mux.CloseStream(streamID)
-	}
-	c.streams = make(map[uint32]*Stream)
-	c.streamsMu.Unlock()
-
-	// Close underlying connection (this will interrupt ReceiveFrame blocking)
-	c.conn.Close()
-
-	// Wait for receive loop to finish (with timeout to avoid permanent blocking)
-	select {
-	case <-c.receiveDone:
-	case <-time.After(1 * time.Second):
-		// Timeout, force exit
-	}
-
-	return nil
-}
-
-// LocalAddr returns the local network address
-func (c *connectionImpl) LocalAddr() net.Addr {
-	return c.conn.LocalAddr()
-}
-
-// RemoteAddr returns the remote network address
-func (c *connectionImpl) RemoteAddr() net.Addr {
-	return c.conn.RemoteAddr()
-}
-
-// SetDeadline sets the read and write deadlines
-func (c *connectionImpl) SetDeadline(t time.Time) error {
-	return c.conn.SetDeadline(t)
-}
-
-// SetReadDeadline sets the read deadline
-func (c *connectionImpl) SetReadDeadline(t time.Time) error {
-	return c.conn.SetReadDeadline(t)
-}
-
-// SetWriteDeadline sets the write deadline
-func (c *connectionImpl) SetWriteDeadline(t time.Time) error {
-	return c.conn.SetWriteDeadline(t)
-}
-
-// GetFramer returns the internal Framer
-func (c *connectionImpl) GetFramer() *Framer {
-	return c.mux
-}
-
-// GetActiveStreams returns all active stream IDs
-func (c *connectionImpl) GetActiveStreams() []uint32 {
-	c.streamsMu.RLock()
-	defer c.streamsMu.RUnlock()
-
-	streamIDs := make([]uint32, 0, len(c.streams))
-	for streamID := range c.streams {
-		streamIDs = append(streamIDs, streamID)
-	}
-	return streamIDs
-}
-
-// GetStream returns the stream by stream ID
-func (c *connectionImpl) GetStream(streamID uint32) (*Stream, bool) {
-	c.streamsMu.RLock()
-	defer c.streamsMu.RUnlock()
+// GetStream gets a stream by ID
+func (c *Connection) GetStream(streamID uint32) (*Stream, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	stream, exists := c.streams[streamID]
 	return stream, exists
+}
+
+// CloseStream closes a stream
+func (c *Connection) CloseStream(streamID uint32) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if stream, ok := c.streams[streamID]; ok {
+		close(stream.closeCh)
+		close(stream.readBuf)
+		delete(c.streams, streamID)
+	}
+}
+
+// WriteFrame writes a frame to the connection
+func (c *Connection) WriteFrame(frame *Frame) error {
+	select {
+	case <-c.done:
+		return ErrConnectionClosed
+	case c.writeCh <- frame:
+		return nil
+	}
+}
+
+// IncomingStreams returns a channel that receives streams when they are auto-created
+// from incoming data (e.g. server receives odd streams from client).
+// Handler should read from this to process client-initiated streams.
+func (c *Connection) IncomingStreams() <-chan *Stream {
+	return c.incomingStreamCh
+}
+
+// Close closes the connection and all streams
+func (c *Connection) Close() error {
+	c.once.Do(func() {
+		close(c.done)
+		c.netConn.Close()
+
+		// Close incoming stream channel so handler's range loop exits
+		if c.incomingStreamCh != nil {
+			close(c.incomingStreamCh)
+		}
+
+		// Close all streams
+		c.mu.Lock()
+		for streamID, stream := range c.streams {
+			close(stream.closeCh)
+			close(stream.readBuf)
+			delete(c.streams, streamID)
+		}
+		c.mu.Unlock()
+	})
+	return nil
 }

@@ -1,66 +1,84 @@
 package core
 
 import (
-	"fmt"
+	"log/slog"
 	"net"
 )
 
+// Handler is the interface for handling connections
 type Handler interface {
-	ServeConn(conn Connection)
+	ServeConn(conn *Connection)
 }
 
+// Server represents a server that can listen and accept connections
+// It is the entry point for server-side operations
 type Server struct {
-	addr    string
-	handler Handler
+	mgr      *SessionManager
+	listener net.Listener
+	handler  Handler
 }
 
-func NewServer(addr string, handler Handler) *Server {
+// NewServer creates a new server
+func NewServer() *Server {
 	return &Server{
-		addr:    addr,
-		handler: handler,
+		mgr: NewSessionManager(),
 	}
 }
 
-// Start starts a TCP server
-func (s *Server) Start() {
-	listener, err := net.Listen("tcp", s.addr)
+// SetHandler sets the handler for incoming connections
+func (s *Server) SetHandler(handler Handler) {
+	s.handler = handler
+}
+
+// Listen starts listening on the given address
+func (s *Server) Listen(network, address string) error {
+	listener, err := net.Listen(network, address)
 	if err != nil {
-		fmt.Printf("Failed to start server on %s: %v\n", s.addr, err)
-		return
+		return err
 	}
-	defer listener.Close()
+	s.listener = listener
+	return nil
+}
 
-	fmt.Printf("Server listening on %s\n", s.addr)
+// Serve starts accepting connections and handling them
+func (s *Server) Serve() error {
+	if s.listener == nil {
+		return net.ErrClosed
+	}
 
 	for {
-		conn, err := listener.Accept()
+		netConn, err := s.listener.Accept()
 		if err != nil {
-			fmt.Printf("Failed to accept connection: %v\n", err)
-			continue
+			return err
+		}
+		slog.Debug("Accepted connection", "remote address", netConn.RemoteAddr())
+		// Create connection (server side, uses even streams)
+		conn := NewConnection(netConn, false)
+		conn.Start()
+
+		// Create session
+		session := &Session{
+			conn: conn,
 		}
 
-		// Handle each connection in a separate goroutine
-		go s.serveConn(conn)
+		// Add session to manager using remote address as key
+		key := netConn.RemoteAddr().String()
+		slog.Debug("Added session", "remote address", key)
+		s.mgr.AddSession(key, session)
+
+		// Handle connection
+		if s.handler != nil {
+			slog.Info("Serving connection", "remote address", netConn.RemoteAddr())
+			go s.handler.ServeConn(conn)
+		}
 	}
 }
 
-// serveConn handles client connections
-func (s *Server) serveConn(conn net.Conn) {
-	defer conn.Close()
-
-	mux := s.handler.Framer(conn)
-	fmt.Printf("Client connected from %s\n", conn.RemoteAddr())
-
-	// Simple echo of all received frames
-	for {
-		frame, err := mux.ReceiveFrame()
-		if err != nil {
-			fmt.Printf("Error receiving frame: %v\n", err)
-			return
-		}
-
-		fmt.Printf("Received: StreamID=%d, Data=%s\n", frame.Header.StreamID, string(frame.Data))
-
-		s.handler.HandlePacket(frame, mux)
+// Close closes the server and all sessions
+func (s *Server) Close() error {
+	if s.listener != nil {
+		s.listener.Close()
 	}
+	s.mgr.CloseAll()
+	return nil
 }
