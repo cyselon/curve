@@ -73,6 +73,14 @@ func (s *Session) CreateStream() (*Stream, error) {
 	return s.conn.CreateStream()
 }
 
+// OpenStream creates a new stream on this session.
+func (s *Session) OpenStream() (*Stream, error) {
+	if s.conn == nil {
+		return nil, ErrConnectionClosed
+	}
+	return s.conn.OpenStream()
+}
+
 // GetConnection returns the underlying connection
 func (s *Session) GetConnection() *Connection {
 	return s.conn

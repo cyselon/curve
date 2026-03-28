@@ -103,6 +103,27 @@ func TestNewConnection_ClientStreamIDs(t *testing.T) {
 	client.Close()
 }
 
+func TestConnection_OpenStreamAlias(t *testing.T) {
+	clientNet, serverNet := net.Pipe()
+	defer clientNet.Close()
+	defer serverNet.Close()
+
+	client := NewConnection(clientNet, true)
+	client.Start()
+	defer client.Close()
+
+	stream, err := client.OpenStream()
+	if err != nil {
+		t.Fatalf("OpenStream failed: %v", err)
+	}
+	if stream.StreamID() != stream.ID() {
+		t.Fatalf("expected StreamID alias to match ID, got %d and %d", stream.StreamID(), stream.ID())
+	}
+	if stream.StreamID()%2 == 0 {
+		t.Fatalf("client OpenStream should allocate odd stream IDs, got %d", stream.StreamID())
+	}
+}
+
 func TestNewConnection_ServerStreamIDs(t *testing.T) {
 	clientNet, serverNet := net.Pipe()
 	defer clientNet.Close()

@@ -247,6 +247,12 @@ func (c *Connection) CreateStream() (*Stream, error) {
 	return stream, nil
 }
 
+// OpenStream creates a new local stream.
+// It is the preferred MVP-facing name for stream creation.
+func (c *Connection) OpenStream() (*Stream, error) {
+	return c.CreateStream()
+}
+
 // GetStream gets a stream by ID
 func (c *Connection) GetStream(streamID uint32) (*Stream, bool) {
 	c.mu.RLock()

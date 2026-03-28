@@ -1,7 +1,6 @@
 package app
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -45,15 +44,10 @@ func (c *Client) SendCommand(cmd *Command) error {
 	}
 	defer stream.Close()
 
-	// encode command to JSON
-	data, err := json.Marshal(cmd)
-	if err != nil {
-		return fmt.Errorf("failed to marshal command: %w", err)
+	if err := writeJSONMessage(stream, cmd); err != nil {
+		return fmt.Errorf("failed to send command: %w", err)
 	}
-
-	// write data to stream (will be split into frames automatically)
-	_, err = stream.Write(data)
-	return err
+	return nil
 }
 
 // MplHandler represents a multiplexer handler
@@ -78,9 +72,9 @@ func (s *MplHandler) ServeConn(conn *core.Connection) {
 func (s *MplHandler) handleStream(stream *core.Stream) {
 	defer stream.Close()
 
-	buf := make([]byte, 4096)
 	for {
-		n, err := stream.Read(buf)
+		var cmd Command
+		err := readJSONMessage(stream, &cmd)
 		if err != nil {
 			if err == io.EOF {
 				slog.Info("EOF reading from stream:", "stream", stream.ID())
@@ -90,18 +84,12 @@ func (s *MplHandler) handleStream(stream *core.Stream) {
 			break
 		}
 
-		// handle received data
-		s.handleData(buf[:n], stream)
+		s.handleCommand(&cmd, stream)
 	}
 }
 
-// handleData handles received data
-func (s *MplHandler) handleData(data []byte, stream *core.Stream) {
-	var cmd Command
-	if err := json.Unmarshal(data, &cmd); err != nil {
-		slog.Error("Error decoding command:", "error", err, "stream", stream.ID(), "size", len(data), "data", string(data))
-		return
-	}
+// handleCommand handles a decoded command message.
+func (s *MplHandler) handleCommand(cmd *Command, stream *core.Stream) {
 	slog.Info("Received command:", "command", cmd.Action, "stream", stream.ID())
 	// execute command logic
 	switch cmd.Action {
@@ -119,15 +107,7 @@ func (s *MplHandler) handleData(data []byte, stream *core.Stream) {
 
 // sendResponse sends a response
 func (s *MplHandler) sendResponse(stream *core.Stream, data map[string]interface{}) {
-	response, err := json.Marshal(data)
-	if err != nil {
-		slog.Error("Error encoding response:", "error", err)
-		return
-	}
-
-	// use stream's Write method to send response
-	_, err = stream.Write(response)
-	if err != nil {
+	if err := writeJSONMessage(stream, data); err != nil {
 		slog.Error("Error sending response:", "error", err)
 	}
 }

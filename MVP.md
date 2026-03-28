@@ -41,7 +41,9 @@ Every frame must include at least:
 
 `Frame.Data` carries raw bytes only.
 
-The MVP does not introduce separate control frame types yet.
+The MVP does not introduce separate control frame semantics yet.
+
+An implementation may keep placeholder enum values or reserved constants for future control frames, but the active wire path for this stage must remain data-only.
 
 4. Payload splitting on write
 
@@ -65,6 +67,8 @@ Each logical stream must expose at least:
 7. Local stream creation
 
 The local side must be able to create a new stream with `OpenStream()`.
+
+Compatibility aliases such as `CreateStream()` are acceptable as long as the primary API converges on the MVP naming.
 
 Client and server must use distinct stream ID spaces to avoid collisions.
 

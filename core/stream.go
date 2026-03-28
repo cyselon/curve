@@ -116,6 +116,12 @@ func (s *Stream) ID() uint32 {
 	return s.id
 }
 
+// StreamID returns the logical stream ID.
+// It is the preferred MVP-facing name for stream identification.
+func (s *Stream) StreamID() uint32 {
+	return s.id
+}
+
 func (s *Stream) isClosed() bool {
 	select {
 	case <-s.closeCh:
