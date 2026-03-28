@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"io"
 	"net"
 	"sync"
@@ -21,6 +22,57 @@ func setupTestConnection(t *testing.T) (clientConn, serverConn *Connection) {
 	serverConn.Start()
 
 	return clientConn, serverConn
+}
+
+func waitForStream(t *testing.T, conn *Connection, streamID uint32) *Stream {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if stream, ok := conn.GetStream(streamID); ok {
+			return stream
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting for stream %d", streamID)
+	return nil
+}
+
+func TestFrame_EncodeDecodeIncludesVersion(t *testing.T) {
+	original := &Frame{
+		Version:  CurrentVersion,
+		StreamID: 7,
+		Type:     FrameData,
+		Flags:    3,
+		Payload:  []byte("hello"),
+	}
+
+	encoded := original.Encode()
+	if got := encoded[0]; got != CurrentVersion {
+		t.Fatalf("expected first header byte to be version %d, got %d", CurrentVersion, got)
+	}
+
+	var decoded Frame
+	if err := decoded.Decode(bytes.NewReader(encoded)); err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	if decoded.Version != CurrentVersion {
+		t.Fatalf("expected version %d, got %d", CurrentVersion, decoded.Version)
+	}
+	if decoded.StreamID != original.StreamID {
+		t.Fatalf("expected StreamID %d, got %d", original.StreamID, decoded.StreamID)
+	}
+	if decoded.Type != original.Type {
+		t.Fatalf("expected Type %d, got %d", original.Type, decoded.Type)
+	}
+	if decoded.Flags != original.Flags {
+		t.Fatalf("expected Flags %d, got %d", original.Flags, decoded.Flags)
+	}
+	if !bytes.Equal(decoded.Payload, original.Payload) {
+		t.Fatalf("expected payload %q, got %q", original.Payload, decoded.Payload)
+	}
 }
 
 func TestNewConnection_ClientStreamIDs(t *testing.T) {
@@ -153,6 +205,76 @@ func TestConnection_ClientToServerDataTransfer(t *testing.T) {
 	}
 
 	clientStream.Close()
+}
+
+func TestConnection_ConcurrentMultiStreamTransmission(t *testing.T) {
+	clientConn, serverConn := setupTestConnection(t)
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	payloads := make(map[uint32][]byte)
+	streams := make([]*Stream, 5)
+
+	for i := range streams {
+		stream, err := clientConn.CreateStream()
+		if err != nil {
+			t.Fatalf("CreateStream %d failed: %v", i, err)
+		}
+		streams[i] = stream
+		payloads[stream.ID()] = bytes.Repeat([]byte{byte('a' + i)}, 1024+(i*37))
+	}
+
+	var wg sync.WaitGroup
+	for _, stream := range streams {
+		stream := stream
+		payload := payloads[stream.ID()]
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := stream.Write(payload); err != nil {
+				t.Errorf("Write failed for stream %d: %v", stream.ID(), err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	for _, stream := range streams {
+		remoteStream := waitForStream(t, serverConn, stream.ID())
+		got := make([]byte, len(payloads[stream.ID()]))
+		if _, err := io.ReadFull(remoteStream, got); err != nil {
+			t.Fatalf("ReadFull failed for stream %d: %v", stream.ID(), err)
+		}
+		if !bytes.Equal(got, payloads[stream.ID()]) {
+			t.Fatalf("payload mismatch for stream %d", stream.ID())
+		}
+	}
+}
+
+func TestConnection_LargePayloadSplitAndReassembly(t *testing.T) {
+	clientConn, serverConn := setupTestConnection(t)
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	clientStream, err := clientConn.CreateStream()
+	if err != nil {
+		t.Fatalf("CreateStream failed: %v", err)
+	}
+
+	payload := bytes.Repeat([]byte("curve"), (DefaultFrameSize*3/5)+257)
+
+	if _, err := clientStream.Write(payload); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	serverStream := waitForStream(t, serverConn, clientStream.ID())
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(serverStream, got); err != nil {
+		t.Fatalf("ReadFull failed: %v", err)
+	}
+
+	if !bytes.Equal(got, payload) {
+		t.Fatal("reassembled payload does not match original payload")
+	}
 }
 
 func TestConnection_GetStream(t *testing.T) {
@@ -304,4 +426,46 @@ func TestConnection_CloseIsIdempotent(t *testing.T) {
 	// 确保不会 panic
 	serverConn.Close()
 	serverConn.Close()
+}
+
+func TestConnection_CloseUnblocksStreamRead(t *testing.T) {
+	clientConn, serverConn := setupTestConnection(t)
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	clientStream, err := clientConn.CreateStream()
+	if err != nil {
+		t.Fatalf("CreateStream failed: %v", err)
+	}
+
+	if _, err := clientStream.Write([]byte("init")); err != nil {
+		t.Fatalf("initial Write failed: %v", err)
+	}
+
+	serverStream := waitForStream(t, serverConn, clientStream.ID())
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(serverStream, buf); err != nil {
+		t.Fatalf("initial ReadFull failed: %v", err)
+	}
+
+	readDone := make(chan error, 1)
+	go func() {
+		blockingBuf := make([]byte, 1)
+		_, err := serverStream.Read(blockingBuf)
+		readDone <- err
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	if err := clientConn.Close(); err != nil {
+		t.Fatalf("client Close failed: %v", err)
+	}
+
+	select {
+	case err := <-readDone:
+		if err != io.EOF {
+			t.Fatalf("expected io.EOF after close, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Read did not unblock after connection close")
+	}
 }

@@ -33,9 +33,9 @@ type Connection struct {
 	framer  *Framer
 
 	// stream management
-	mu                  sync.RWMutex
-	streams             map[uint32]*Stream
-	nextStreamID        uint32
+	mu                   sync.RWMutex
+	streams              map[uint32]*Stream
+	nextStreamID         uint32
 	maxConcurrentStreams uint32
 	isClient             bool // true for client (uses odd streams), false for server (uses even streams)
 
@@ -59,12 +59,12 @@ func NewConnection(netConn net.Conn, isClient bool) *Connection {
 	return &Connection{
 		netConn:              netConn,
 		framer:               NewFramer(),
-		streams:               make(map[uint32]*Stream),
-		nextStreamID:          initialStream,
+		streams:              make(map[uint32]*Stream),
+		nextStreamID:         initialStream,
 		maxConcurrentStreams: DefaultMaxConcurrentStreams,
 		isClient:             isClient,
-		writeCh:               make(chan *Frame, 100),
-		done:                  make(chan struct{}),
+		writeCh:              make(chan *Frame, 100),
+		done:                 make(chan struct{}),
 		incomingStreamCh:     make(chan *Stream, 32),
 	}
 }
@@ -108,9 +108,7 @@ func (c *Connection) readLoop() {
 		c.mu.RUnlock()
 
 		if exists {
-			select {
-			case stream.readBuf <- frame.Payload:
-			case <-c.done:
+			if !c.deliverToStream(stream, frame.Payload) {
 				return
 			}
 		} else if frame.StreamID == ControlStreamID {
@@ -162,9 +160,7 @@ func (c *Connection) readLoop() {
 							// channel full, handler will poll GetStream if needed
 						}
 					}
-					select {
-					case stream.readBuf <- frame.Payload:
-					case <-c.done:
+					if !c.deliverToStream(stream, frame.Payload) {
 						return
 					}
 				}
@@ -264,9 +260,7 @@ func (c *Connection) CloseStream(streamID uint32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if stream, ok := c.streams[streamID]; ok {
-		close(stream.closeCh)
-		close(stream.readBuf)
+	if _, ok := c.streams[streamID]; ok {
 		delete(c.streams, streamID)
 	}
 }
@@ -302,11 +296,23 @@ func (c *Connection) Close() error {
 		// Close all streams
 		c.mu.Lock()
 		for streamID, stream := range c.streams {
-			close(stream.closeCh)
-			close(stream.readBuf)
+			stream.once.Do(func() {
+				close(stream.closeCh)
+			})
 			delete(c.streams, streamID)
 		}
 		c.mu.Unlock()
 	})
 	return nil
+}
+
+func (c *Connection) deliverToStream(stream *Stream, payload []byte) bool {
+	select {
+	case stream.readBuf <- payload:
+		return true
+	case <-stream.closeCh:
+		return true
+	case <-c.done:
+		return false
+	}
 }

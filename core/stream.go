@@ -13,18 +13,22 @@ const (
 // Stream represents an active stream with independent Reader/Writer interfaces
 // It implements io.ReadWriteCloser
 type Stream struct {
-	closed  bool
 	id      uint32
 	conn    *Connection   // parent connection
 	readBuf chan []byte   // data channel from connection
 	closeCh chan struct{} // close channel
+	once    sync.Once
 	mu      sync.Mutex
 	buffer  []byte // internal buffer for partial reads
 }
 
 // Read reads data from the stream
 func (s *Stream) Read(p []byte) (n int, err error) {
-	if s.closed {
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	if s.isClosed() {
 		return 0, io.EOF
 	}
 
@@ -63,7 +67,7 @@ func (s *Stream) Read(p []byte) (n int, err error) {
 // Write writes data to the stream
 // Data is split into frames and sent via the connection
 func (s *Stream) Write(p []byte) (n int, err error) {
-	if s.closed {
+	if s.isClosed() {
 		return 0, io.ErrClosedPipe
 	}
 
@@ -79,6 +83,7 @@ func (s *Stream) Write(p []byte) (n int, err error) {
 
 		// Create frame
 		frame := &Frame{
+			Version:  CurrentVersion,
 			StreamID: s.id,
 			Type:     FrameData,
 			Flags:    0,
@@ -99,15 +104,23 @@ func (s *Stream) Write(p []byte) (n int, err error) {
 
 // Close closes the stream
 func (s *Stream) Close() error {
-	if s.closed {
-		return nil
-	}
-	s.closed = true
-	s.conn.CloseStream(s.id)
+	s.once.Do(func() {
+		close(s.closeCh)
+		s.conn.CloseStream(s.id)
+	})
 	return nil
 }
 
 // ID returns the stream ID
 func (s *Stream) ID() uint32 {
 	return s.id
+}
+
+func (s *Stream) isClosed() bool {
+	select {
+	case <-s.closeCh:
+		return true
+	default:
+		return false
+	}
 }
