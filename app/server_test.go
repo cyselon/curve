@@ -70,6 +70,53 @@ func TestMplHandlerPingRoundTripWithLengthPrefixedJSON(t *testing.T) {
 	}
 }
 
+func TestMplHandlerSupportsMultipleMessagesOnOneStream(t *testing.T) {
+	clientConn, serverConn := setupAppTestConnection(t)
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	handler := NewMplHandler()
+	go handler.ServeConn(serverConn)
+
+	stream, err := clientConn.CreateStream()
+	if err != nil {
+		t.Fatalf("CreateStream failed: %v", err)
+	}
+	defer stream.Close()
+
+	commands := []*Command{
+		{
+			Action: "ping",
+			Params: map[string]any{
+				"seq": 1,
+			},
+		},
+		{
+			Action: "ping",
+			Params: map[string]any{
+				"seq":     2,
+				"payload": string(make([]byte, core.DefaultFrameSize+128)),
+			},
+		},
+	}
+
+	for _, cmd := range commands {
+		if err := writeJSONMessage(stream, cmd); err != nil {
+			t.Fatalf("writeJSONMessage failed: %v", err)
+		}
+	}
+
+	for i := range commands {
+		var response map[string]any
+		if err := readJSONMessage(stream, &response); err != nil {
+			t.Fatalf("readJSONMessage %d failed: %v", i, err)
+		}
+		if got := response["message"]; got != "pong" {
+			t.Fatalf("expected pong response for message %d, got %#v", i, got)
+		}
+	}
+}
+
 func TestReadJSONMessageReturnsEOFOnTruncatedPayload(t *testing.T) {
 	var cmd Command
 	err := readJSONMessage(bytes.NewReader([]byte{0, 0, 0, 1}), &cmd)
