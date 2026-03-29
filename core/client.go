@@ -30,12 +30,10 @@ func (c *Client) Dial(network, address string) (*Session, error) {
 	conn.Start()
 
 	// Create session
-	session := &Session{
-		conn: conn,
-	}
+	session := NewSession(netConn.RemoteAddr().String(), conn)
 
 	// Add session to manager using remote address as key
-	key := netConn.RemoteAddr().String()
+	key := session.id
 	c.mgr.AddSession(key, session)
 
 	return session, nil

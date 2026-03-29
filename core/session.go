@@ -17,6 +17,14 @@ type SessionManager struct {
 	sessions map[string]*Session // key can be remote address or specific ID
 }
 
+// NewSession creates a session from an active connection.
+func NewSession(id string, conn *Connection) *Session {
+	return &Session{
+		id:   id,
+		conn: conn,
+	}
+}
+
 // NewSessionManager creates a new session manager
 func NewSessionManager() *SessionManager {
 	return &SessionManager{
@@ -79,6 +87,39 @@ func (s *Session) OpenStream() (*Stream, error) {
 		return nil, ErrConnectionClosed
 	}
 	return s.conn.OpenStream()
+}
+
+// ResetStream aborts a stream on this session.
+func (s *Session) ResetStream(streamID uint32) error {
+	if s.conn == nil {
+		return ErrConnectionClosed
+	}
+	return s.conn.resetStreamLocally(streamID)
+}
+
+// AcceptStream waits for the next remotely opened stream on this session.
+func (s *Session) AcceptStream() (*Stream, error) {
+	if s.conn == nil {
+		return nil, ErrConnectionClosed
+	}
+
+	select {
+	case <-s.conn.done:
+		return nil, ErrConnectionClosed
+	case stream, ok := <-s.conn.IncomingStreams():
+		if !ok {
+			return nil, ErrConnectionClosed
+		}
+		return stream, nil
+	}
+}
+
+// IncomingStreams returns the stream-accept channel for this session.
+func (s *Session) IncomingStreams() <-chan *Stream {
+	if s.conn == nil {
+		return nil
+	}
+	return s.conn.IncomingStreams()
 }
 
 // GetConnection returns the underlying connection

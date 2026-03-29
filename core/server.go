@@ -7,7 +7,7 @@ import (
 
 // Handler is the interface for handling connections
 type Handler interface {
-	ServeConn(conn *Connection)
+	ServeSession(session *Session)
 }
 
 // Server represents a server that can listen and accept connections
@@ -57,19 +57,17 @@ func (s *Server) Serve() error {
 		conn.Start()
 
 		// Create session
-		session := &Session{
-			conn: conn,
-		}
+		session := NewSession(netConn.RemoteAddr().String(), conn)
 
 		// Add session to manager using remote address as key
-		key := netConn.RemoteAddr().String()
+		key := session.id
 		slog.Debug("Added session", "remote address", key)
 		s.mgr.AddSession(key, session)
 
 		// Handle connection
 		if s.handler != nil {
 			slog.Info("Serving connection", "remote address", netConn.RemoteAddr())
-			go s.handler.ServeConn(conn)
+			go s.handler.ServeSession(session)
 		}
 	}
 }

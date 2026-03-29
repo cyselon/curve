@@ -8,52 +8,47 @@ import (
 )
 
 const (
-	// DefaultMaxConcurrentStreams is the default maximum number of concurrent streams
+	// DefaultMaxConcurrentStreams is the default maximum number of concurrent streams.
 	DefaultMaxConcurrentStreams = 100
-	// ControlStreamID is reserved for control stream
+	// ControlStreamID is reserved for control stream.
 	ControlStreamID = 0
 )
 
 var (
-	// ErrMaxStreamsReached indicates the maximum number of streams has been reached
+	// ErrMaxStreamsReached indicates the maximum number of streams has been reached.
 	ErrMaxStreamsReached = errors.New("maximum concurrent streams reached")
-	// ErrInvalidStreamID indicates an invalid stream ID (stream 0 is reserved)
+	// ErrInvalidStreamID indicates an invalid stream ID.
 	ErrInvalidStreamID = errors.New("invalid stream ID: stream 0 is reserved for control")
-	// ErrStreamDirectionMismatch indicates stream direction mismatch
+	// ErrStreamDirectionMismatch indicates stream direction mismatch.
 	ErrStreamDirectionMismatch = errors.New("stream direction mismatch")
-	// ErrConnectionClosed indicates the connection is closed
+	// ErrConnectionClosed indicates the connection is closed.
 	ErrConnectionClosed = errors.New("connection closed")
 )
 
-// Connection represents a connection to a server
-// It manages the physical net.Conn, handles stream lifecycle, read/write loops,
-// and dispatches frames to the correct Stream
+// Connection represents a connection to a server.
 type Connection struct {
 	netConn net.Conn
 	framer  *Framer
 
-	// stream management
 	mu                   sync.RWMutex
 	streams              map[uint32]*Stream
 	nextStreamID         uint32
 	maxConcurrentStreams uint32
-	isClient             bool // true for client (uses odd streams), false for server (uses even streams)
+	isClient             bool
 
-	// signal and channel
-	writeCh          chan *Frame // all streams share this write channel
+	writeCh          chan *Frame
 	done             chan struct{}
 	once             sync.Once
-	incomingStreamCh chan *Stream // receives streams when auto-created from incoming data
+	incomingStreamCh chan *Stream
 }
 
-// NewConnection creates a new connection
-// isClient: true for client (uses odd streams), false for server (uses even streams)
+// NewConnection creates a new connection.
 func NewConnection(netConn net.Conn, isClient bool) *Connection {
 	var initialStream uint32
 	if isClient {
-		initialStream = 1 // client starts from 1 (odd)
+		initialStream = 1
 	} else {
-		initialStream = 2 // server starts from 2 (even)
+		initialStream = 2
 	}
 
 	return &Connection{
@@ -69,20 +64,19 @@ func NewConnection(netConn net.Conn, isClient bool) *Connection {
 	}
 }
 
-// SetMaxConcurrentStreams sets the maximum number of concurrent streams
+// SetMaxConcurrentStreams sets the maximum number of concurrent streams.
 func (c *Connection) SetMaxConcurrentStreams(max uint32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.maxConcurrentStreams = max
 }
 
-// Start starts the read and write loops
+// Start starts the read and write loops.
 func (c *Connection) Start() {
 	go c.readLoop()
 	go c.writeLoop()
 }
 
-// readLoop continuously reads frames from the connection and dispatches them to streams
 func (c *Connection) readLoop() {
 	defer c.Close()
 
@@ -98,78 +92,22 @@ func (c *Connection) readLoop() {
 			if err == io.EOF {
 				return
 			}
-			// Handle other errors, maybe log them
 			return
 		}
 
-		// Dispatch frame to the correct stream
-		c.mu.RLock()
-		stream, exists := c.streams[frame.StreamID]
-		c.mu.RUnlock()
-
-		if exists {
-			if !c.deliverToStream(stream, frame.Payload) {
+		if frame.Type == FrameControl {
+			if !c.handleControlFrame(frame) {
 				return
 			}
-		} else if frame.StreamID == ControlStreamID {
-			// Handle control frames
-			// TODO: implement control frame handling
-		} else {
-			// Auto-create stream for incoming frames from the other side
-			// Client creates odd streams, server receives them
-			// Server creates even streams, client receives them
-			isIncomingStream := false
-			if c.isClient {
-				// Client receives even streams from server
-				isIncomingStream = frame.StreamID%2 == 0
-			} else {
-				// Server receives odd streams from client
-				isIncomingStream = frame.StreamID%2 != 0
-			}
+			continue
+		}
 
-			if isIncomingStream {
-				// Create stream for receiving data
-				isNewStream := false
-				c.mu.Lock()
-				// Check again after acquiring lock
-				if _, stillExists := c.streams[frame.StreamID]; !stillExists {
-					// Check stream limit
-					if uint32(len(c.streams)) < c.maxConcurrentStreams {
-						stream = &Stream{
-							id:      frame.StreamID,
-							conn:    c,
-							readBuf: make(chan []byte, 10),
-							closeCh: make(chan struct{}),
-						}
-						c.streams[frame.StreamID] = stream
-						isNewStream = true
-					}
-				} else {
-					stream = c.streams[frame.StreamID]
-				}
-				c.mu.Unlock()
-
-				if stream != nil {
-					// Notify handler of new stream (non-blocking)
-					if isNewStream && c.incomingStreamCh != nil {
-						select {
-						case c.incomingStreamCh <- stream:
-						case <-c.done:
-							return
-						default:
-							// channel full, handler will poll GetStream if needed
-						}
-					}
-					if !c.deliverToStream(stream, frame.Payload) {
-						return
-					}
-				}
-			}
+		if !c.handleDataFrame(frame) {
+			return
 		}
 	}
 }
 
-// writeLoop continuously writes frames from the write channel to the connection
 func (c *Connection) writeLoop() {
 	defer c.Close()
 
@@ -177,8 +115,8 @@ func (c *Connection) writeLoop() {
 		select {
 		case <-c.done:
 			return
-		case frame := <-c.writeCh:
-			if frame == nil {
+		case frame, ok := <-c.writeCh:
+			if !ok || frame == nil {
 				return
 			}
 			buf := c.framer.EncodeFrame(frame)
@@ -189,71 +127,56 @@ func (c *Connection) writeLoop() {
 	}
 }
 
-// CreateStream creates a new stream
-// Returns the stream or error if maximum stream limit is reached
+// CreateStream creates a new stream.
 func (c *Connection) CreateStream() (*Stream, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
-	// Check if maximum stream limit is reached
 	if uint32(len(c.streams)) >= c.maxConcurrentStreams {
+		c.mu.Unlock()
 		return nil, ErrMaxStreamsReached
 	}
 
-	// Find next valid stream ID
 	var streamID uint32
 	for {
 		streamID = c.nextStreamID
-
-		// Ensure stream ID is not 0 (0 is reserved for control stream)
 		if streamID == ControlStreamID {
 			streamID++
 		}
-
-		// Ensure stream ID matches direction requirements
-		if c.isClient {
-			// Client must use odd streams
-			if streamID%2 == 0 {
-				streamID++
-			}
-		} else {
-			// Server must use even streams
-			if streamID%2 != 0 {
-				streamID++
-			}
+		if c.isClient && streamID%2 == 0 {
+			streamID++
 		}
-
-		// Check if stream ID is already in use
+		if !c.isClient && streamID%2 != 0 {
+			streamID++
+		}
 		if _, exists := c.streams[streamID]; !exists {
 			break
 		}
-
-		// Stream ID is already in use, try next
-		c.nextStreamID = streamID + 2 // Skip by 2 (to maintain odd/even)
+		c.nextStreamID = streamID + 2
 	}
 
-	// Update next stream ID (skip by 2 to maintain odd/even)
 	c.nextStreamID = streamID + 2
 
-	// Create stream
-	stream := &Stream{
-		id:      streamID,
-		conn:    c,
-		readBuf: make(chan []byte, 10),
-		closeCh: make(chan struct{}),
+	stream := newStream(c, streamID)
+	c.streams[streamID] = stream
+	c.mu.Unlock()
+
+	if err := c.WriteFrame(NewControlFrame(streamID, ControlOpen)); err != nil {
+		c.mu.Lock()
+		delete(c.streams, streamID)
+		c.mu.Unlock()
+		stream.forceConnectionClose()
+		return nil, err
 	}
 
-	c.streams[streamID] = stream
 	return stream, nil
 }
 
 // OpenStream creates a new local stream.
-// It is the preferred MVP-facing name for stream creation.
 func (c *Connection) OpenStream() (*Stream, error) {
 	return c.CreateStream()
 }
 
-// GetStream gets a stream by ID
+// GetStream gets a stream by ID.
 func (c *Connection) GetStream(streamID uint32) (*Stream, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -261,17 +184,15 @@ func (c *Connection) GetStream(streamID uint32) (*Stream, bool) {
 	return stream, exists
 }
 
-// CloseStream closes a stream
+// CloseStream removes a stream from the active map.
 func (c *Connection) CloseStream(streamID uint32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if _, ok := c.streams[streamID]; ok {
-		delete(c.streams, streamID)
-	}
+	delete(c.streams, streamID)
 }
 
-// WriteFrame writes a frame to the connection
+// WriteFrame writes a frame to the connection.
 func (c *Connection) WriteFrame(frame *Frame) error {
 	select {
 	case <-c.done:
@@ -281,30 +202,25 @@ func (c *Connection) WriteFrame(frame *Frame) error {
 	}
 }
 
-// IncomingStreams returns a channel that receives streams when they are auto-created
-// from incoming data (e.g. server receives odd streams from client).
-// Handler should read from this to process client-initiated streams.
+// IncomingStreams returns a channel that receives remotely opened streams.
 func (c *Connection) IncomingStreams() <-chan *Stream {
 	return c.incomingStreamCh
 }
 
-// Close closes the connection and all streams
+// Close closes the connection and all streams.
 func (c *Connection) Close() error {
 	c.once.Do(func() {
 		close(c.done)
-		c.netConn.Close()
+		close(c.writeCh)
+		_ = c.netConn.Close()
 
-		// Close incoming stream channel so handler's range loop exits
 		if c.incomingStreamCh != nil {
 			close(c.incomingStreamCh)
 		}
 
-		// Close all streams
 		c.mu.Lock()
 		for streamID, stream := range c.streams {
-			stream.once.Do(func() {
-				close(stream.closeCh)
-			})
+			stream.forceConnectionClose()
 			delete(c.streams, streamID)
 		}
 		c.mu.Unlock()
@@ -320,5 +236,182 @@ func (c *Connection) deliverToStream(stream *Stream, payload []byte) bool {
 		return true
 	case <-c.done:
 		return false
+	}
+}
+
+func (c *Connection) handleDataFrame(frame *Frame) bool {
+	c.mu.RLock()
+	stream, exists := c.streams[frame.StreamID]
+	c.mu.RUnlock()
+	if !exists {
+		_ = c.WriteFrame(NewControlFrame(frame.StreamID, ControlReset))
+		return true
+	}
+
+	stream.mu.Lock()
+	closed := stream.localClosed || stream.remoteClosed || stream.reset || stream.connClosed
+	stream.mu.Unlock()
+	if closed {
+		_ = c.WriteFrame(NewControlFrame(frame.StreamID, ControlReset))
+		return true
+	}
+
+	return c.deliverToStream(stream, frame.Payload)
+}
+
+func (c *Connection) handleControlFrame(frame *Frame) bool {
+	switch frame.Control() {
+	case ControlOpen:
+		return c.handleOpen(frame.StreamID)
+	case ControlClose:
+		return c.handleRemoteClose(frame.StreamID)
+	case ControlReset:
+		return c.handleRemoteReset(frame.StreamID)
+	default:
+		return true
+	}
+}
+
+func (c *Connection) handleOpen(streamID uint32) bool {
+	if streamID == ControlStreamID || !c.isRemoteInitiatedStream(streamID) {
+		_ = c.WriteFrame(NewControlFrame(streamID, ControlReset))
+		return true
+	}
+
+	c.mu.Lock()
+	if _, exists := c.streams[streamID]; exists {
+		c.mu.Unlock()
+		_ = c.WriteFrame(NewControlFrame(streamID, ControlReset))
+		return true
+	}
+	if uint32(len(c.streams)) >= c.maxConcurrentStreams {
+		c.mu.Unlock()
+		_ = c.WriteFrame(NewControlFrame(streamID, ControlReset))
+		return true
+	}
+
+	stream := newStream(c, streamID)
+	c.streams[streamID] = stream
+	c.mu.Unlock()
+
+	if c.incomingStreamCh != nil {
+		select {
+		case c.incomingStreamCh <- stream:
+		case <-c.done:
+			return false
+		default:
+		}
+	}
+
+	return true
+}
+
+func (c *Connection) handleRemoteClose(streamID uint32) bool {
+	c.mu.RLock()
+	stream, exists := c.streams[streamID]
+	c.mu.RUnlock()
+	if !exists {
+		_ = c.WriteFrame(NewControlFrame(streamID, ControlReset))
+		return true
+	}
+
+	stream.mu.Lock()
+	alreadyTerminal := stream.remoteClosed || stream.localClosed || stream.reset || stream.connClosed
+	if !alreadyTerminal {
+		stream.remoteClosed = true
+	}
+	stream.mu.Unlock()
+	if alreadyTerminal {
+		_ = c.WriteFrame(NewControlFrame(streamID, ControlReset))
+		return true
+	}
+
+	stream.signalClose()
+	c.CloseStream(streamID)
+	return true
+}
+
+func (c *Connection) handleRemoteReset(streamID uint32) bool {
+	c.mu.RLock()
+	stream, exists := c.streams[streamID]
+	c.mu.RUnlock()
+	if !exists {
+		return true
+	}
+
+	stream.mu.Lock()
+	stream.reset = true
+	stream.mu.Unlock()
+	stream.signalClose()
+	c.CloseStream(streamID)
+	return true
+}
+
+func (c *Connection) closeStreamLocally(streamID uint32) error {
+	c.mu.RLock()
+	stream, exists := c.streams[streamID]
+	c.mu.RUnlock()
+	if !exists {
+		return nil
+	}
+
+	stream.mu.Lock()
+	if stream.localClosed || stream.remoteClosed || stream.reset || stream.connClosed {
+		stream.mu.Unlock()
+		return nil
+	}
+	stream.localClosed = true
+	stream.mu.Unlock()
+
+	if err := c.WriteFrame(NewControlFrame(streamID, ControlClose)); err != nil {
+		return err
+	}
+
+	stream.signalClose()
+	c.CloseStream(streamID)
+	return nil
+}
+
+func (c *Connection) resetStreamLocally(streamID uint32) error {
+	c.mu.RLock()
+	stream, exists := c.streams[streamID]
+	c.mu.RUnlock()
+	if !exists {
+		return nil
+	}
+
+	stream.mu.Lock()
+	if stream.reset || stream.connClosed {
+		stream.mu.Unlock()
+		return nil
+	}
+	stream.reset = true
+	stream.mu.Unlock()
+
+	if err := c.WriteFrame(NewControlFrame(streamID, ControlReset)); err != nil {
+		return err
+	}
+
+	stream.signalClose()
+	c.CloseStream(streamID)
+	return nil
+}
+
+func (c *Connection) isRemoteInitiatedStream(streamID uint32) bool {
+	if streamID == ControlStreamID {
+		return false
+	}
+	if c.isClient {
+		return streamID%2 == 0
+	}
+	return streamID%2 != 0
+}
+
+func newStream(conn *Connection, streamID uint32) *Stream {
+	return &Stream{
+		id:      streamID,
+		conn:    conn,
+		readBuf: make(chan []byte, 10),
+		closeCh: make(chan struct{}),
 	}
 }

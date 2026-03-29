@@ -14,6 +14,13 @@ type Command struct {
 	Params map[string]interface{} `json:"params"` // command parameters
 }
 
+// Response represents an application response message.
+type Response struct {
+	OK    bool           `json:"ok"`
+	Data  map[string]any `json:"data,omitempty"`
+	Error string         `json:"error,omitempty"`
+}
+
 // Client represents an application layer client
 type Client struct {
 	*core.Client
@@ -36,18 +43,32 @@ func NewClient(server string) (*Client, error) {
 
 // SendCommand sends a command
 func (c *Client) SendCommand(cmd *Command) error {
+	_, err := c.RoundTrip(cmd)
+	return err
+}
+
+// RoundTrip sends a command and waits for a single response on the same stream.
+func (c *Client) RoundTrip(cmd *Command) (*Response, error) {
 	slog.Info("Sending command:", "command", cmd)
-	// create stream
-	stream, err := c.session.CreateStream()
+	stream, err := c.session.OpenStream()
 	if err != nil {
-		return fmt.Errorf("failed to create stream: %w", err)
+		return nil, fmt.Errorf("failed to create stream: %w", err)
 	}
 	defer stream.Close()
 
 	if err := writeJSONMessage(stream, cmd); err != nil {
-		return fmt.Errorf("failed to send command: %w", err)
+		return nil, fmt.Errorf("failed to send command: %w", err)
 	}
-	return nil
+
+	var resp Response
+	if err := readJSONMessage(stream, &resp); err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+	if !resp.OK {
+		return &resp, fmt.Errorf("command failed: %s", resp.Error)
+	}
+
+	return &resp, nil
 }
 
 // MplHandler represents a multiplexer handler
@@ -59,10 +80,10 @@ func NewMplHandler() *MplHandler {
 	return &MplHandler{}
 }
 
-// ServeConn implements core.Handler interface, handling connection
-// Reads from IncomingStreams() - streams auto-created when client sends data (odd stream IDs)
-func (s *MplHandler) ServeConn(conn *core.Connection) {
-	for stream := range conn.IncomingStreams() {
+// ServeSession implements core.Handler interface, handling streams symmetrically
+// through the session-level incoming stream API.
+func (s *MplHandler) ServeSession(session *core.Session) {
+	for stream := range session.IncomingStreams() {
 		// Handle each client-initiated stream in a goroutine
 		go s.handleStream(stream)
 	}
@@ -95,19 +116,30 @@ func (s *MplHandler) handleCommand(cmd *Command, stream *core.Stream) {
 	switch cmd.Action {
 	case "ping":
 		slog.Info("Received ping command")
-		response := map[string]any{"message": "pong"}
-		s.sendResponse(stream, response)
+		s.sendSuccess(stream, map[string]any{"message": "pong"})
 	case "upload":
 		slog.Info("Received upload command")
-		// handle upload logic
+		s.sendSuccess(stream, map[string]any{"status": "accepted"})
 	default:
 		slog.Info("Unknown command:", "command", cmd.Action)
+		s.sendError(stream, fmt.Sprintf("unknown command: %s", cmd.Action))
 	}
 }
 
-// sendResponse sends a response
-func (s *MplHandler) sendResponse(stream *core.Stream, data map[string]interface{}) {
-	if err := writeJSONMessage(stream, data); err != nil {
+func (s *MplHandler) sendSuccess(stream *core.Stream, data map[string]any) {
+	if err := writeJSONMessage(stream, &Response{
+		OK:   true,
+		Data: data,
+	}); err != nil {
 		slog.Error("Error sending response:", "error", err)
+	}
+}
+
+func (s *MplHandler) sendError(stream *core.Stream, message string) {
+	if err := writeJSONMessage(stream, &Response{
+		OK:    false,
+		Error: message,
+	}); err != nil {
+		slog.Error("Error sending error response:", "error", err)
 	}
 }

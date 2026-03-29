@@ -41,11 +41,11 @@ func TestMplHandlerPingRoundTripWithLengthPrefixedJSON(t *testing.T) {
 	defer serverConn.Close()
 
 	handler := NewMplHandler()
-	go handler.ServeConn(serverConn)
+	go handler.ServeSession(core.NewSession("test-server", serverConn))
 
-	stream, err := clientConn.CreateStream()
+	stream, err := clientConn.OpenStream()
 	if err != nil {
-		t.Fatalf("CreateStream failed: %v", err)
+		t.Fatalf("OpenStream failed: %v", err)
 	}
 	defer stream.Close()
 
@@ -60,12 +60,15 @@ func TestMplHandlerPingRoundTripWithLengthPrefixedJSON(t *testing.T) {
 		t.Fatalf("writeJSONMessage failed: %v", err)
 	}
 
-	var response map[string]any
+	var response Response
 	if err := readJSONMessage(stream, &response); err != nil {
 		t.Fatalf("readJSONMessage failed: %v", err)
 	}
 
-	if got := response["message"]; got != "pong" {
+	if !response.OK {
+		t.Fatalf("expected OK response, got error %q", response.Error)
+	}
+	if got := response.Data["message"]; got != "pong" {
 		t.Fatalf("expected pong response, got %#v", got)
 	}
 }
@@ -76,11 +79,11 @@ func TestMplHandlerSupportsMultipleMessagesOnOneStream(t *testing.T) {
 	defer serverConn.Close()
 
 	handler := NewMplHandler()
-	go handler.ServeConn(serverConn)
+	go handler.ServeSession(core.NewSession("test-server", serverConn))
 
-	stream, err := clientConn.CreateStream()
+	stream, err := clientConn.OpenStream()
 	if err != nil {
-		t.Fatalf("CreateStream failed: %v", err)
+		t.Fatalf("OpenStream failed: %v", err)
 	}
 	defer stream.Close()
 
@@ -107,13 +110,63 @@ func TestMplHandlerSupportsMultipleMessagesOnOneStream(t *testing.T) {
 	}
 
 	for i := range commands {
-		var response map[string]any
+		var response Response
 		if err := readJSONMessage(stream, &response); err != nil {
 			t.Fatalf("readJSONMessage %d failed: %v", i, err)
 		}
-		if got := response["message"]; got != "pong" {
+		if !response.OK {
+			t.Fatalf("expected OK response for message %d, got error %q", i, response.Error)
+		}
+		if got := response.Data["message"]; got != "pong" {
 			t.Fatalf("expected pong response for message %d, got %#v", i, got)
 		}
+	}
+}
+
+func TestClientRoundTripReturnsStructuredResponse(t *testing.T) {
+	clientConn, serverConn := setupAppTestConnection(t)
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	handler := NewMplHandler()
+	go handler.ServeSession(core.NewSession("test-server", serverConn))
+
+	client := &Client{
+		Client:  core.NewClient(),
+		session: core.NewSession("test-client", clientConn),
+	}
+
+	resp, err := client.RoundTrip(&Command{Action: "ping"})
+	if err != nil {
+		t.Fatalf("RoundTrip failed: %v", err)
+	}
+	if !resp.OK {
+		t.Fatalf("expected success response, got error %q", resp.Error)
+	}
+	if got := resp.Data["message"]; got != "pong" {
+		t.Fatalf("expected pong response, got %#v", got)
+	}
+}
+
+func TestClientRoundTripReturnsCommandError(t *testing.T) {
+	clientConn, serverConn := setupAppTestConnection(t)
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	handler := NewMplHandler()
+	go handler.ServeSession(core.NewSession("test-server", serverConn))
+
+	client := &Client{
+		Client:  core.NewClient(),
+		session: core.NewSession("test-client", clientConn),
+	}
+
+	resp, err := client.RoundTrip(&Command{Action: "unknown"})
+	if err == nil {
+		t.Fatal("expected command error")
+	}
+	if resp == nil || resp.OK {
+		t.Fatalf("expected structured error response, got %#v", resp)
 	}
 }
 
